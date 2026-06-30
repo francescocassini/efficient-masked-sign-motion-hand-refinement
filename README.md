@@ -43,16 +43,17 @@ and copies `overlay/` into the SOKE tree.
 
 ## What the delta adds
 
-The artifact adds the paper implementation around the SOKE-compatible tokenizer,
-decoder and evaluation stack:
+The artifact covers the four paper contributions around the SOKE-compatible
+tokenizer, decoder and evaluation stack:
 
-- Masked non-autoregressive generation variants;
-- train-aligned corruption for masked generation;
-- conservative hand-only refinement;
-- PoseSelect and gain-edit selection utilities;
-- paper experiment configs;
-- reproduction wrappers for the main tables;
-- paper result summaries and qualitative figure assets.
+1. **Masked SOKE-compatible generation** via Masked-NAR and train-aligned
+   corruption.
+2. **Training-free hand polishing** via HandPolish, a body-protected hand-token
+   remasking stage.
+3. **Deployable hand-token selection** via PoseSelect, with GainEdit and
+   OracleSelect included as baseline/diagnostic comparators.
+4. **Controlled geometry, runtime and vitality evaluation** via paper configs,
+   reproduction wrappers, result summaries and qualitative figure assets.
 
 The delta does not include datasets, model checkpoints, generated caches, or
 dataset-derived split archives. Those must be obtained through the original

@@ -15,6 +15,22 @@ Delta layout:
 - `overlay/assets/figures/`: paper qualitative figure assets.
 - `patches/soke-integration.patch`: modifications required in existing SOKE files.
 
+Paper contribution coverage:
+
+- **Masked SOKE-compatible generation**: `overlay/mGPT/archs/mgpt_mbart_nar*.py`,
+  `overlay/configs/lm/*nar*.yaml`, `overlay/configs/train/p3_csl_phoenix.yaml`.
+- **Training-free hand polishing**: `overlay/mGPT/archs/mgpt_mbart_nar_p5_hand_polish*.py`,
+  `overlay/configs/infer/p5_*.yaml`.
+- **Deployable hand-token selection**: `overlay/scripts/train_poseselect.py`,
+  `overlay/scripts/eval_poseselect.py`,
+  `overlay/mGPT/models/utils/p6_topk_candidate_selector.py`.
+- **Controlled geometry, runtime and vitality evaluation**:
+  `overlay/scripts/reproduce_table2_pose.py`,
+  `overlay/scripts/reproduce_table3_efficiency.py`,
+  `overlay/scripts/reproduce_table4_refinement.py`,
+  `overlay/scripts/reproduce_table5_overhead.py`,
+  `overlay/docs/PAPER_RESULTS.md`.
+
 Excluded from the public delta:
 
 - model checkpoints;

@@ -49,12 +49,12 @@ SOKE tokenizer/VQ decoder and does not use ground-truth length at test time.
 | training config | `configs/train/p3_csl_phoenix.yaml` |
 | inference configs | `configs/infer/p3_csl.yaml`, `configs/infer/p3_phoenix.yaml` |
 
-### Paper-facing wrappers to add
+### Paper-facing entrypoints
 
 | Command | Purpose |
 |---|---|
-| `scripts/train_masked_nar.py` | train Masked-NAR |
-| `scripts/infer_masked_nar.py` | run Masked-NAR inference |
+| `train.py --cfg configs/train/p3_csl_phoenix.yaml` | train Masked-NAR using the standard SOKE trainer |
+| `test.py --cfg configs/infer/p3_csl.yaml` / `configs/infer/p3_phoenix.yaml` | run Masked-NAR inference/evaluation |
 | `configs/paper/table2_masked_nar_direct.yaml` | Table 2 direct comparison operating point |
 | `configs/paper/table2_masked_nar_handpolish_base.yaml` | Table 2 matched HandPolish base |
 
@@ -75,16 +75,16 @@ no trainable parameters and does not require a separate checkpoint.
 | final LM config | `configs/lm/mbart_h2s_csl_phoenix_nar_p5_hand_polish_aggressive.yaml` |
 | inference configs | `configs/infer/p5_csl.yaml`, `configs/infer/p5_phoenix.yaml` |
 
-### Paper-facing wrappers to add
+### Paper-facing entrypoints
 
 | Command | Purpose |
 |---|---|
-| `scripts/run_handpolish.py` | run HandPolish inference from Masked-NAR checkpoint |
+| `test.py --cfg configs/infer/p5_csl.yaml` / `configs/infer/p5_phoenix.yaml` | run HandPolish inference/evaluation from a Masked-NAR checkpoint |
 | `configs/paper/table2_handpolish.yaml` | Table 2 HandPolish operating point |
 
-### Required test
+### Invariant
 
-Add a synthetic unit test proving:
+HandPolish is designed to preserve the body stream:
 
 ```text
 body_tokens_after_handpolish == body_tokens_before_handpolish
@@ -108,19 +108,18 @@ features at test time. It is deployable, but not parameter-free.
 | alignment report | `SOKE/scripts/a3_p6k_r5_alignment_report.py` |
 | R5 aggregation | `SOKE/scripts/a3_p6k_r5_aggregate.py` |
 
-### Paper-facing wrappers to add
+### Paper-facing entrypoints
 
 | Command | Purpose |
 |---|---|
-| `scripts/build_poseselect_cache.py` | prepare matched HandPolish caches if needed |
 | `scripts/train_poseselect.py` | train PoseSelect on train cache with separate val cache |
 | `scripts/eval_poseselect.py` | evaluate PoseSelect on held-out/generated cache |
 | `scripts/reproduce_table4_refinement.py` | reproduce post-cache Table 4 |
 | `scripts/reproduce_table5_overhead.py` | reproduce overhead Table 5 |
 
-### Required tests
+### Implementation checks
 
-Add lightweight checks that:
+The release layout and paired-evaluation scripts cover that:
 
 - the train script accepts separate train and validation cache dirs;
 - the inference/eval path can run without ground-truth fields as model inputs;
@@ -136,7 +135,7 @@ Add lightweight checks that:
 | Table 2 | native PA-JPE benchmark | `scripts/reproduce_table2_pose.py`, `configs/paper/table2_*.yaml` |
 | Table 3 | end-to-end test-loop efficiency | `scripts/reproduce_table3_efficiency.py`, `configs/paper/table3_*.yaml` |
 | Table 4 | post-cache hand-token refinement | `scripts/reproduce_table4_refinement.py`, `configs/paper/table4_poseselect_postcache.yaml` |
-| Table 5 | post-cache runtime overhead | `scripts/reproduce_table5_overhead.py`, `configs/paper/table5_overhead.yaml` |
+| Table 5 | post-cache runtime overhead | `scripts/reproduce_table5_overhead.py`, `docs/results/table5_overhead/summary.json` |
 
 ## Artifact mapping
 
