@@ -1,0 +1,18 @@
+target: mGPT.archs.mgpt_mbart_nar.Mbart_Based_MLM_NAR
+params:
+  model_type: mbart_multi
+  model_path: ./deps/mbart-h2s-csl-phoenix
+  num_heads: 3
+  stage: ${TRAIN.STAGE}
+  motion_codebook_size: ${model.params.codebook_size}
+  ablation: ${ABLATION}
+  nar_steps: 12
+  nar_min_mask_ratio: 0.05
+  nar_on_policy_prob: 0.0
+  nar_sample_temperature: 2.0
+  nar_sample_top_k: 40
+  length_predictor: true
+  length_predictor_kind: linear_text_units
+  length_only_training: false
+  length_min_tokens: 10
+  length_max_tokens: 100

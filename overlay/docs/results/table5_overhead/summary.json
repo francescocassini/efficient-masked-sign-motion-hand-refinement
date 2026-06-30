@@ -1,0 +1,177 @@
+{
+  "benchmark": "p6k_t0a_style_from_p5_cache",
+  "scope": "post_cache_deployable_variants_with_gpu_monitor",
+  "dataset": "both",
+  "samples": 240,
+  "warmup_samples": 16,
+  "cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_FULL/test_rank_0",
+  "device": "cuda:1",
+  "topk": 5,
+  "budget": 0.2,
+  "seed": 1234,
+  "gpu_index": "1",
+  "monitor_interval": 0.05,
+  "checkpoints": {
+    "p6b": "results/p6_hand_token_editor/clean_trainval_e20_h256_l4/best_p6_hand_token_editor.pt",
+    "p6d": "results/p6_hand_gain_regressor/clean_trainval_e10_h192_l3/best_p6_hand_gain_regressor.pt",
+    "p6k": "results/p6_pose_aware_candidate_selector_clean/clean_trainval_e12_top5_b020_h256/best_p6_pose_aware_candidate_selector.pt"
+  },
+  "checkpoint_args": {
+    "p6b": {
+      "hidden_features": 256,
+      "layers": 4,
+      "heads": 4,
+      "dropout": 0.1,
+      "low_conf_weight": 1.5,
+      "cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_TRAIN/train_rank_0",
+      "val_cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_VAL/val_rank_0",
+      "split_source": "separate_cache",
+      "vae_ckpt": "deps/tokenizer_ckpt/tokenizer.ckpt"
+    },
+    "p6d": {
+      "hidden_features": 192,
+      "layers": 3,
+      "heads": 4,
+      "dropout": 0.1,
+      "target_scale": 10.0,
+      "positive_weight": 1.5,
+      "p6b_checkpoint": "results/p6_hand_token_editor/clean_trainval_e20_h256_l4/best_p6_hand_token_editor.pt",
+      "cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_TRAIN/train_rank_0",
+      "val_cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_VAL/val_rank_0",
+      "split_source": "separate_cache"
+    },
+    "p6k": {
+      "hidden_features": 256,
+      "dropout": 0.1,
+      "meta_dim": 16,
+      "topk": 5,
+      "budget": 0.2,
+      "target_scale": 10.0,
+      "ce_weight": 1.0,
+      "reg_weight": 0.2,
+      "positive_weight": 2.0,
+      "p6b_checkpoint": "results/p6_hand_token_editor/clean_trainval_e20_h256_l4/best_p6_hand_token_editor.pt",
+      "regressor_checkpoint": "results/p6_hand_gain_regressor/clean_trainval_e10_h192_l3/best_p6_hand_gain_regressor.pt",
+      "cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_TRAIN/train_rank_0",
+      "val_cache_dir": "results/mgpt_t5c_extended_cache/T5C_P5_CONF_CACHE_VAL/val_rank_0",
+      "split_source": "separate_cache",
+      "split_unit": "sample",
+      "train_samples": 25491,
+      "val_samples": 1596
+    }
+  },
+  "variants": [
+    {
+      "variant": "p5_cache",
+      "samples": 240,
+      "frames": 27012,
+      "duration_s": 0.0010472219998973742,
+      "throughput_samples_s": 229177.76748723723,
+      "time_per_sample_s": 4.363424999572393e-06,
+      "throughput_frames_s": 25793957.73068855,
+      "cuda_peak_memory_mib": 253.9287109375,
+      "gpu_monitor_available": false,
+      "gpu_monitor_error": null,
+      "gpu_samples": 1,
+      "peak_memory_mib_nvidia_smi": null,
+      "mean_power_w": null,
+      "peak_power_w": null,
+      "gpu_energy_j": null,
+      "gpu_energy_j_per_sample": null,
+      "mean_utilization_pct": null
+    },
+    {
+      "variant": "p6d_clean",
+      "samples": 240,
+      "frames": 27012,
+      "duration_s": 1.059705718000032,
+      "throughput_samples_s": 226.4779701792576,
+      "time_per_sample_s": 0.0044154404916668,
+      "throughput_frames_s": 25490.09554367544,
+      "cuda_peak_memory_mib": 259.06787109375,
+      "gpu_monitor_available": true,
+      "gpu_monitor_error": null,
+      "gpu_samples": 16,
+      "peak_memory_mib_nvidia_smi": 413.0,
+      "mean_power_w": 55.62437500000001,
+      "peak_power_w": 55.64,
+      "gpu_energy_j": 58.97831721425056,
+      "gpu_energy_j_per_sample": 0.24574298839271067,
+      "mean_utilization_pct": 0.0,
+      "sampled_duration_s": 1.059705718000032
+    },
+    {
+      "variant": "p6k_clean",
+      "samples": 240,
+      "frames": 27012,
+      "duration_s": 20.35505510100006,
+      "throughput_samples_s": 11.790682894698163,
+      "time_per_sample_s": 0.08481272958750026,
+      "throughput_frames_s": 1327.041359798278,
+      "cuda_peak_memory_mib": 259.06787109375,
+      "gpu_monitor_available": true,
+      "gpu_monitor_error": null,
+      "gpu_samples": 246,
+      "peak_memory_mib_nvidia_smi": 413.0,
+      "mean_power_w": 42.27959349593486,
+      "peak_power_w": 56.05,
+      "gpu_energy_j": 893.3893488550185,
+      "gpu_energy_j_per_sample": 3.7224556202292436,
+      "mean_utilization_pct": 0.0,
+      "sampled_duration_s": 20.35505510100006
+    }
+  ],
+  "overhead": {
+    "p6d_minus_p5_cache": 0.0044110770666672275,
+    "p6k_minus_p5_cache": 0.08480836616250069,
+    "p6k_minus_p6d": 0.08039728909583346
+  },
+  "quality_reference": {
+    "csl": {
+      "p5_cache": {
+        "pa_body": 8.3074,
+        "pa_hand": 1.8057,
+        "speed_gt": 0.773,
+        "tstd_gt": 0.611
+      },
+      "p6d_clean": {
+        "pa_body": 8.2913,
+        "pa_hand": 1.6918,
+        "speed_gt": 0.735,
+        "tstd_gt": 0.587
+      },
+      "p6k_clean": {
+        "pa_body": 8.288,
+        "pa_hand": 1.6877,
+        "speed_gt": 0.768,
+        "tstd_gt": 0.636
+      }
+    },
+    "phoenix": {
+      "p5_cache": {
+        "pa_body": 6.7821,
+        "pa_hand": 1.3497,
+        "speed_gt": 0.544,
+        "tstd_gt": 0.587
+      },
+      "p6d_clean": {
+        "pa_body": 6.7746,
+        "pa_hand": 1.3109,
+        "speed_gt": 0.454,
+        "tstd_gt": 0.508
+      },
+      "p6k_clean": {
+        "pa_body": 6.7711,
+        "pa_hand": 1.3104,
+        "speed_gt": 0.52,
+        "tstd_gt": 0.574
+      }
+    }
+  },
+  "method_notes": [
+    "Starts from validated P5/T5C cache.",
+    "P6-D and P6-K include final LH/RH VQ decode.",
+    "Metric computation, rendering and prediction saving are excluded.",
+    "No ground-truth motion is used by the measured inference path."
+  ]
+}

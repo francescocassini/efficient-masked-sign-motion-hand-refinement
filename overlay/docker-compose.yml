@@ -1,0 +1,23 @@
+services:
+  sokenar:
+    build: .
+    image: ${SOKENAR_IMAGE:-efficient-masked-sign-motion:local}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HF_HOME: /workspace/cache/huggingface
+      SOKENAR_DATA_ROOT: /workspace/datasets
+      SOKENAR_ARTIFACT_ROOT: /workspace/artifacts
+      SOKENAR_CHECKPOINT: /workspace/artifacts/checkpoints/p3.ckpt
+    volumes:
+      - ./datasets:/workspace/datasets
+      - ./artifacts:/workspace/artifacts
+      - ./.cache:/workspace/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,45 @@
+NAME: SOKENAR_P3_TRAIN_ALIGNED_CSLPHX_150EP
+ACCELERATOR: 'gpu'
+NUM_NODES: 1
+DEVICE: [0]
+
+# Controlled clone of sokenar_cslphx_150ep.yaml.
+# Only the LM target changes to the separate P3 train-aligned variant.
+TRAIN:
+  STAGE: lm_pretrain
+  NUM_WORKERS: 4
+  BATCH_SIZE: 16
+  ACCUMULATE_GRAD_BATCHES: 2
+  END_EPOCH: 150
+  RESUME: ''
+  PRETRAINED: ''
+  PRETRAINED_VAE: 'deps/tokenizer_ckpt/tokenizer.ckpt'
+  OPTIM:
+    target: AdamW
+    params: {lr: 2e-4, betas: [0.9, 0.99], weight_decay: 0.0}
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: ${TRAIN.END_EPOCH}
+      eta_min: 1e-6
+
+EVAL: {BATCH_SIZE: 4, SPLIT: test, MAX_SAMPLES: null}
+TEST: {CHECKPOINTS: null, SPLIT: test, BATCH_SIZE: 4, REPLICATION_TIMES: 1, SAVE_PREDICTIONS: False, MAX_SAMPLES: null}
+
+DATASET:
+  target: mGPT.data.H2S.H2SDataModule
+  H2S: {DATASET_NAME: csl_phoenix, ROOT: datasets/How2Sign, CSL_ROOT: datasets/CSL-Daily, PHOENIX_ROOT: datasets/Phoenix_2014T, MEAN_PATH: datasets/CSL-Daily/mean.pt, STD_PATH: datasets/CSL-Daily/std.pt, MAX_MOTION_LEN: 400, MIN_MOTION_LEN: 40, MAX_TEXT_LEN: 40, PICK_ONE_TEXT: true, FRAME_RATE: 20.0, UNIT_LEN: 4, STD_TEXT: False}
+  CODE_PATH: TOKENS_h2s_csl_phoenix
+
+METRIC: {TYPE: ['TM2TMetrics'], DTW_STRIDE: 1, DTW_MAX_FRAMES: 0, DTW_WINDOW: 0, EXACT_DTW_BACKEND: torch, EXACT_DTW_CHUNK: 128}
+LOSS: {LAMBDA_FEATURE: 1.0, LAMBDA_VELOCITY: 0.0, LAMBDA_COMMIT: 0.02, LAMBDA_CLS: 1.0, ABLATION: {RECONS_LOSS: l1_smooth}}
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: text
+    task: t2m
+    lm: ${lm.mbart_h2s_csl_phoenix_nar_p3_train_aligned}
+    motion_vae: ${vq.re96}
+    hand_vae_cfg: ${vq.hand192}
+    rhand_vae_cfg: ${vq.hand192}
+LOGGER: {TYPE: [tensorboard], LOGGERS: [tensorboard], VAL_EVERY_STEPS: 10, MINIMAL_METRICS_ONLY: True, LOG_PAPER_REFERENCES: False, LOG_GAP_TO_PAPER: False, LOG_CKPT_WALLTIME: False}

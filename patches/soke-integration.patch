@@ -1,0 +1,2013 @@
+diff --git a/.gitignore b/.gitignore
+index 335399d..6a94337 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,24 +1,30 @@
+-__pycache__
+ __pycache__/
+-checkpoints
+-checkpoints/
+-deps
++*.py[cod]
++.pytest_cache/
++.mypy_cache/
++.ruff_cache/
++.venv/
++venv/
++.env
++.cache/
++
+ deps/
+-experiments
++datasets/
++artifacts/
+ experiments/
+-experiments_1
+-experiments_1/
+-results
+ results/
+-visualize
+-visualize/
+-wandb
++logs/
++gifs/
++run_state/
+ wandb/
+-slurm/job
+-slurm/job/
+-slurm/out
+-slurm/out/
++lightning_logs/
+ 
+-*.csv
++*.ckpt
++*.safetensors
++*.pt
++*.pth
++*.bin
++*.tar
++*.tar.gz
+ *.zip
+-*.png
+\ No newline at end of file
++
+diff --git a/configs/default.yaml b/configs/default.yaml
+index 1371a93..0dcf3c5 100644
+--- a/configs/default.yaml
++++ b/configs/default.yaml
+@@ -30,6 +30,7 @@ EVAL:
+   SPLIT: 'val' # Validation split name
+   BATCH_SIZE: 16 # Validation Batch size
+   NUM_WORKERS: 16 # Validation Batch size
++  MAX_SAMPLES: null # Optional cap for quick validation runs
+ 
+ TEST:
+   CHECKPOINTS: '' # Pretrained model path
+@@ -77,6 +78,11 @@ METRIC:
+   TASK: 't2m'
+   FORCE_IN_METER: True
+   DIST_SYNC_ON_STEP: True
++  DTW_STRIDE: 1 # >1 speeds up DTW via temporal subsampling
++  DTW_MAX_FRAMES: 0 # 0 disables frame cap before DTW
++  DTW_WINDOW: 0 # 0 disables Sakoe-Chiba window constraint
++  EXACT_DTW_BACKEND: 'legacy' # legacy | torch (exact pairwise cost on torch device)
++  EXACT_DTW_CHUNK: 128 # chunk hint for exact torch backend
+   MM_NUM_SAMPLES: 100 # Number of samples for multimodal test
+   MM_NUM_REPEATS: 30 # Number of repeats for multimodal test
+   MM_NUM_TIMES: 10 # Number of times to repeat the multimodal test
+@@ -128,6 +134,10 @@ DEMO:
+ 
+ LOGGER:
+   VAL_EVERY_STEPS: 10
++  MINIMAL_METRICS_ONLY: True # Log only a focused metric set to W&B
++  LOG_PAPER_REFERENCES: False # If True, log constant paper reference values
++  LOG_GAP_TO_PAPER: False # If True, log delta(metric - paper_reference)
++  LOG_CKPT_WALLTIME: False # If True, log walltime helper metrics for ckpt names
+   LOGGERS: ['wandb']
+   TENSORBOARD:
+     target: pytorch_lightning.loggers.TensorBoardLogger
+diff --git a/configs/soke.yaml b/configs/soke.yaml
+index 9f72676..9d5278e 100644
+--- a/configs/soke.yaml
++++ b/configs/soke.yaml
+@@ -12,7 +12,7 @@ TRAIN:
+   END_EPOCH: 150 # End epoch
+   RESUME: '' # Resume training from this path
+   PRETRAINED: '' # Preatrained model path
+-  PRETRAINED_VAE: 'experiments/mgpt/vae/checkpoints/tokenizer.ckpt' # Vae model path
++  PRETRAINED_VAE: 'deps/tokenizer_ckpt/tokenizer.ckpt' # Vae model path
+ 
+   OPTIM:
+     target: AdamW
+@@ -59,6 +59,11 @@ DATASET:
+ 
+ METRIC:
+   TYPE: ['TM2TMetrics']
++  DTW_STRIDE: 1
++  DTW_MAX_FRAMES: 0
++  DTW_WINDOW: 0
++  EXACT_DTW_BACKEND: 'torch'
++  EXACT_DTW_CHUNK: 128
+ 
+ LOSS:
+   LAMBDA_FEATURE: 1.0
+@@ -81,6 +86,10 @@ model:
+ LOGGER:
+   TYPE: ['wandb']
+   VAL_EVERY_STEPS: 5
++  MINIMAL_METRICS_ONLY: True
++  LOG_PAPER_REFERENCES: False
++  LOG_GAP_TO_PAPER: False
++  LOG_CKPT_WALLTIME: False
+   WANDB:
+     params:
+-      project: SLG
+\ No newline at end of file
++      project: SLG
+diff --git a/mGPT/callback.py b/mGPT/callback.py
+index 68afe1e..8e6ae39 100644
+--- a/mGPT/callback.py
++++ b/mGPT/callback.py
+@@ -1,7 +1,27 @@
+ import os
++import time
++from datetime import datetime
++import torch
+ from pytorch_lightning import LightningModule, Trainer
+ from pytorch_lightning.callbacks import Callback, RichProgressBar, ModelCheckpoint
+ 
++PAPER_TABLE1_SOKE_REFERENCE = {
++    # DTW-PA-JPE (Body, Hand)
++    "Metrics/how2sign_DTW_PA_JPE_body": 6.82,
++    "Metrics/how2sign_DTW_PA_JPE_hand": 2.35,
++    "Metrics/csl_DTW_PA_JPE_body": 6.24,
++    "Metrics/csl_DTW_PA_JPE_hand": 1.71,
++    "Metrics/phoenix_DTW_PA_JPE_body": 4.77,
++    "Metrics/phoenix_DTW_PA_JPE_hand": 1.38,
++    # DTW-JPE (Body, Hand)
++    "Metrics/how2sign_DTW_JPE_body": 7.75,
++    "Metrics/how2sign_DTW_JPE_hand": 10.08,
++    "Metrics/csl_DTW_JPE_body": 7.38,
++    "Metrics/csl_DTW_JPE_hand": 9.68,
++    "Metrics/phoenix_DTW_JPE_body": 6.04,
++    "Metrics/phoenix_DTW_JPE_hand": 7.72,
++}
++
+ 
+ def build_callbacks(cfg, logger=None, phase='test', **kwargs):
+     callbacks = []
+@@ -18,46 +38,40 @@ def build_callbacks(cfg, logger=None, phase='test', **kwargs):
+ 
+ def getCheckpointCallback(cfg, logger=None, **kwargs):
+     callbacks = []
++    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+     # Logging
+     metric_monitor = {
+         "loss_total": "total/train",
+-        "Train_jf": "recons/text2jfeats/train",
+-        "Val_jf": "recons/text2jfeats/val",
+-        "Train_rf": "recons/text2rfeats/train",
+-        "Val_rf": "recons/text2rfeats/val",
+-        "APE root": "Metrics/APE_root",
+-        "APE mean pose": "Metrics/APE_mean_pose",
+-        "AVE root": "Metrics/AVE_root",
+-        "AVE mean pose": "Metrics/AVE_mean_pose",
+-        "R_TOP_1": "Metrics/R_precision_top_1",
+-        "R_TOP_2": "Metrics/R_precision_top_2",
+-        "R_TOP_3": "Metrics/R_precision_top_3",
+-        "gt_R_TOP_3": "Metrics/gt_R_precision_top_3",
+-        "FID": "Metrics/FID",
+-        "gt_FID": "Metrics/gt_FID",
+-        "Diversity": "Metrics/Diversity",
+-        "MM dist": "Metrics/Matching_score",
+-        "Accuracy": "Metrics/accuracy",
+-        "how2sign_DTW_MPJPE_PA_lhand": "Metrics/how2sign_DTW_MPJPE_PA_lhand",
+-        "how2sign_DTW_MPJPE_PA_rhand": "Metrics/how2sign_DTW_MPJPE_PA_rhand",
+-        "how2sign_DTW_MPJPE_PA_body": "Metrics/how2sign_DTW_MPJPE_PA_body",
+-        "csl_DTW_MPJPE_PA_lhand": "Metrics/csl_DTW_MPJPE_PA_lhand",
+-        "csl_DTW_MPJPE_PA_rhand": "Metrics/csl_DTW_MPJPE_PA_rhand",
+-        "csl_DTW_MPJPE_PA_body": "Metrics/csl_DTW_MPJPE_PA_body",
+-        "phoenix_DTW_MPJPE_PA_lhand": "Metrics/phoenix_DTW_MPJPE_PA_lhand",
+-        "phoenix_DTW_MPJPE_PA_rhand": "Metrics/phoenix_DTW_MPJPE_PA_rhand",
+-        "phoenix_DTW_MPJPE_PA_body": "Metrics/phoenix_DTW_MPJPE_PA_body",
+-        "how2sign_MPVPE_PA_all": "Metrics/how2sign_MPVPE_PA_all",
+-        "how2sign_MPJPE_PA_hand": "Metrics/how2sign_MPJPE_PA_hand",
+-        "csl_MPVPE_PA_all": "Metrics/csl_MPVPE_PA_all",
+-        "csl_MPJPE_PA_hand": "Metrics/csl_MPJPE_PA_hand",
+-        "phoenix_MPVPE_PA_all": "Metrics/phoenix_MPVPE_PA_all",
+-        "phoenix_MPJPE_PA_hand": "Metrics/phoenix_MPJPE_PA_hand",
+-        "BLEU_1": "Metrics/Bleu_1",
+-        "BLEU_2": "Metrics/Bleu_2",
+-        "BLEU_3": "Metrics/Bleu_3",
+-        "BLEU_4": "Metrics/Bleu_4",
+-        "ROUGE_L": "Metrics/ROUGE_L",
++        "gpt_train": "gpt/loss/train",
++        "gpt_val": "gpt/loss/val",
++        "gpthand_train": "gpthand/loss/train",
++        "gpthand_val": "gpthand/loss/val",
++        "gptrhand_train": "gptrhand/loss/train",
++        "gptrhand_val": "gptrhand/loss/val",
++        "how2sign_DTW_PA_JPE_body": "Metrics/how2sign_DTW_PA_JPE_body",
++        "how2sign_DTW_PA_JPE_hand": "Metrics/how2sign_DTW_PA_JPE_hand",
++        "how2sign_DTW_JPE_body": "Metrics/how2sign_DTW_JPE_body",
++        "how2sign_DTW_JPE_hand": "Metrics/how2sign_DTW_JPE_hand",
++        "csl_DTW_PA_JPE_body": "Metrics/csl_DTW_PA_JPE_body",
++        "csl_DTW_PA_JPE_hand": "Metrics/csl_DTW_PA_JPE_hand",
++        "csl_DTW_JPE_body": "Metrics/csl_DTW_JPE_body",
++        "csl_DTW_JPE_hand": "Metrics/csl_DTW_JPE_hand",
++        "phoenix_DTW_PA_JPE_body": "Metrics/phoenix_DTW_PA_JPE_body",
++        "phoenix_DTW_PA_JPE_hand": "Metrics/phoenix_DTW_PA_JPE_hand",
++        "phoenix_DTW_JPE_body": "Metrics/phoenix_DTW_JPE_body",
++        "phoenix_DTW_JPE_hand": "Metrics/phoenix_DTW_JPE_hand",
++        "ckpt_overall_hand_pa": "ckpt_val_overall_hand_pa_mean",
++        "ckpt_train_loss": "ckpt_train_loss",
++        "length_mae": "length/mae_tokens_val",
++        "length_acc1": "length/acc_within_1_val",
++        "length_acc2": "length/acc_within_2_val",
++        "length_acc5": "length/acc_within_5_val",
++        "length_bias_csl": "length/bias_csl_val",
++        "length_bias_phoenix": "length/bias_phoenix_val",
++        "length_ratio_csl": "length/ratio_csl_val",
++        "length_ratio_phoenix": "length/ratio_phoenix_val",
++        "length_under75_csl": "length/under_75pct_csl_val",
++        "length_under75_phoenix": "length/under_75pct_phoenix_val",
+     }
+     callbacks.append(
+         progressLogger(logger,metric_monitor=metric_monitor,log_every_n_steps=1))
+@@ -83,17 +97,49 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
+     # })
+     # callbacks.append(ModelCheckpoint(**checkpointParams))
+ 
+-    checkpointParams = {
+-        'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+-        'filename': "{epoch}",
+-        'monitor': "step",
+-        'mode': "max",
+-        'every_n_epochs': None,  #cfg.LOGGER.VAL_EVERY_STEPS,
+-        'save_top_k': 1,
+-        'save_last': True, #None,
+-        'save_on_train_epoch_end': False
+-    }
+-    # callbacks.append(ModelCheckpoint(**checkpointParams))
++    # 1) Single global "last" checkpoint (no duplicated last-v1/last-v2).
++    callbacks.append(
++        ModelCheckpoint(
++            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
++            monitor=None,
++            mode="min",
++            save_top_k=0,
++            save_last=True,
++            every_n_epochs=1,
++            save_on_train_epoch_end=True,
++            filename="unused",
++        ))
++
++    # 2) Best validation overall checkpoint (top-5), based on mean HAND DTW-PA-JPE
++    # across how2sign/csl/phoenix from validation (paper-compatible metric).
++    callbacks.append(
++        ModelCheckpoint(
++            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
++            monitor="ckpt_val_overall_hand_pa_mean",
++            mode="min",
++            save_top_k=5,
++            save_last=False,
++            every_n_epochs=None,
++            save_on_train_epoch_end=False,
++            auto_insert_metric_name=False,
++            filename=
++            f"best-overall-val-{run_stamp}-e{{epoch:03d}}-s{{step}}-pa-hand-mean{{ckpt_val_overall_hand_pa_mean:.4f}}",
++        ))
++
++    # 3) Best train-loss checkpoint (single best).
++    callbacks.append(
++        ModelCheckpoint(
++            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
++            monitor="ckpt_train_loss",
++            mode="min",
++            save_top_k=1,
++            save_last=False,
++            every_n_epochs=1,
++            save_on_train_epoch_end=True,
++            auto_insert_metric_name=False,
++            filename=
++            f"best-trainloss-{run_stamp}-e{{epoch:03d}}-s{{step}}-loss{{ckpt_train_loss:.4f}}",
++        ))
+ 
+     metrics = cfg.METRIC.TYPE
+     metric_monitor_map = {
+@@ -190,28 +236,45 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
+     #     'save_top_k': 1,
+     # })
+ 
+-    for metric in metrics:
+-        if metric in metric_monitor_map.keys():
+-            metric_monitors = metric_monitor_map[metric]
+-
+-            # Delete R3 if training VAE
+-            if cfg.TRAIN.STAGE == 'vae' and metric == 'TM2TMetrics':
+-                del metric_monitors['Metrics/R_precision_top_3']
+-
+-            for metric_monitor in metric_monitors:
+-                checkpointParams.update({
+-                    'filename':
+-                    metric_monitor_map[metric][metric_monitor]['mode']
+-                    + "-" +
+-                    metric_monitor_map[metric][metric_monitor]['abbr']
+-                    + "{epoch}",
+-                    'monitor':
+-                    metric_monitor,
+-                    'mode':
+-                    metric_monitor_map[metric][metric_monitor]['mode'],
+-                })
+-                callbacks.append(
+-                    ModelCheckpoint(**checkpointParams))
++    # 4) Dataset-specific best checkpoints, top-1 only.
++    callbacks.extend([
++        ModelCheckpoint(
++            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
++            monitor="ckpt_val_how2sign_hand_pa",
++            mode="min",
++            save_top_k=1,
++            save_last=False,
++            every_n_epochs=None,
++            save_on_train_epoch_end=False,
++            auto_insert_metric_name=False,
++            filename=
++            f"best-how2sign-{run_stamp}-e{{epoch:03d}}-s{{step}}-pa-hand{{ckpt_val_how2sign_hand_pa:.4f}}",
++        ),
++        ModelCheckpoint(
++            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
++            monitor="ckpt_val_csl_hand_pa",
++            mode="min",
++            save_top_k=1,
++            save_last=False,
++            every_n_epochs=None,
++            save_on_train_epoch_end=False,
++            auto_insert_metric_name=False,
++            filename=
++            f"best-csl-{run_stamp}-e{{epoch:03d}}-s{{step}}-pa-hand{{ckpt_val_csl_hand_pa:.4f}}",
++        ),
++        ModelCheckpoint(
++            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
++            monitor="ckpt_val_phoenix_hand_pa",
++            mode="min",
++            save_top_k=1,
++            save_last=False,
++            every_n_epochs=None,
++            save_on_train_epoch_end=False,
++            auto_insert_metric_name=False,
++            filename=
++            f"best-phoenix-{run_stamp}-e{{epoch:03d}}-s{{step}}-pa-hand{{ckpt_val_phoenix_hand_pa:.4f}}",
++        ),
++    ])
+     return callbacks
+ 
+ class progressBar(RichProgressBar):
+@@ -248,6 +311,95 @@ class progressLogger(Callback):
+                                 pl_module: LightningModule, **kwargs) -> None:
+         if trainer.sanity_checking:
+             self.logger.info("Sanity checking ok.")
++            return
++
++        logger_cfg = pl_module.hparams.cfg.LOGGER
++        log_paper_ref = bool(getattr(logger_cfg, "LOG_PAPER_REFERENCES", False))
++        log_gap_to_paper = bool(getattr(logger_cfg, "LOG_GAP_TO_PAPER", False))
++        log_ckpt_walltime = bool(getattr(logger_cfg, "LOG_CKPT_WALLTIME", False))
++
++        losses_dict = trainer.callback_metrics
++        tm2t_metrics = getattr(getattr(pl_module, "metrics", None), "TM2TMetrics", None)
++        val_aliases = {
++            "ckpt_val_how2sign_hand_pa": "Metrics/how2sign_DTW_PA_JPE_hand",
++            "ckpt_val_csl_hand_pa": "Metrics/csl_DTW_PA_JPE_hand",
++            "ckpt_val_phoenix_hand_pa": "Metrics/phoenix_DTW_PA_JPE_hand",
++        }
++        val_values = []
++        for alias, source in val_aliases.items():
++            value = None
++            if source in losses_dict:
++                value = losses_dict[source].detach().float()
++            elif tm2t_metrics is not None:
++                # Fallback independent from callback ordering:
++                # compute hand PA metric directly from TM2T accumulated states.
++                dataset = source.replace("Metrics/", "").split("_DTW_")[0]
++                l_key = f"{dataset}_DTW_PA_JPE_lhand"
++                r_key = f"{dataset}_DTW_PA_JPE_rhand"
++                c_key = f"{dataset}_count_seq"
++                if all(hasattr(tm2t_metrics, k) for k in [l_key, r_key, c_key]):
++                    lh = getattr(tm2t_metrics, l_key).detach().float()
++                    rh = getattr(tm2t_metrics, r_key).detach().float()
++                    cnt = getattr(tm2t_metrics, c_key).detach().float().clamp(min=1e-6)
++                    value = (lh + rh) / 2.0 / cnt
++
++            if value is not None:
++                pl_module.log(
++                    alias,
++                    value,
++                    logger=True,
++                    on_step=False,
++                    on_epoch=True,
++                    prog_bar=False,
++                    sync_dist=True)
++                val_values.append(value)
++
++        if len(val_values) == 3:
++            mean_value = torch.stack(val_values).mean()
++            pl_module.log("ckpt_val_overall_hand_pa_mean",
++                          mean_value,
++                          logger=True,
++                          on_step=False,
++                          on_epoch=True,
++                          prog_bar=False,
++                          sync_dist=True)
++            if log_ckpt_walltime:
++                pl_module.log("ckpt_val_walltime",
++                              torch.tensor(float(time.time()),
++                                           device=mean_value.device),
++                              logger=True,
++                              on_step=False,
++                              on_epoch=True,
++                              prog_bar=False,
++                              sync_dist=True)
++
++        # Optional logs for analysis sessions (disabled in minimal mode).
++        if log_paper_ref or log_gap_to_paper:
++            for metric_name, ref_value in PAPER_TABLE1_SOKE_REFERENCE.items():
++                if metric_name not in losses_dict:
++                    continue
++                metric_value = losses_dict[metric_name].detach().float()
++                ref_tensor = torch.tensor(float(ref_value), device=metric_value.device)
++                if log_paper_ref:
++                    pl_module.log(
++                        "PaperRef/" + metric_name.replace("Metrics/", ""),
++                        ref_tensor,
++                        logger=True,
++                        on_step=False,
++                        on_epoch=True,
++                        prog_bar=False,
++                        sync_dist=True,
++                    )
++                if log_gap_to_paper:
++                    pl_module.log(
++                        "GapToPaper/" + metric_name.replace("Metrics/", ""),
++                        metric_value - ref_tensor,
++                        logger=True,
++                        on_step=False,
++                        on_epoch=True,
++                        prog_bar=False,
++                        sync_dist=True,
++                    )
+ 
+     def on_train_epoch_end(self,
+                            trainer: Trainer,
+@@ -273,3 +425,26 @@ class progressLogger(Callback):
+             line = line + ": " + "   ".join(metrics_str)
+ 
+         self.logger.info(line)
++
++        # Alias metrics for checkpoint naming/monitoring on train epoch end.
++        logger_cfg = pl_module.hparams.cfg.LOGGER
++        log_ckpt_walltime = bool(getattr(logger_cfg, "LOG_CKPT_WALLTIME", False))
++        losses_dict = trainer.callback_metrics
++        if "total/train" in losses_dict:
++            train_loss = losses_dict["total/train"].detach().float()
++            pl_module.log("ckpt_train_loss",
++                          train_loss,
++                          logger=True,
++                          on_step=False,
++                          on_epoch=True,
++                          prog_bar=False,
++                          sync_dist=True)
++            if log_ckpt_walltime:
++                pl_module.log("ckpt_train_walltime",
++                              torch.tensor(float(time.time()),
++                                           device=train_loss.device),
++                              logger=True,
++                              on_step=False,
++                              on_epoch=True,
++                              prog_bar=False,
++                              sync_dist=True)
+diff --git a/mGPT/config.py b/mGPT/config.py
+index c8af488..1df4228 100644
+--- a/mGPT/config.py
++++ b/mGPT/config.py
+@@ -42,6 +42,43 @@ def instantiate_from_config(config):
+     return get_obj_from_str(config["target"])(**config.get("params", dict()))
+ 
+ 
++def _env_int(name, default):
++    raw = os.environ.get(name, "").strip()
++    if raw == "":
++        return default
++    try:
++        return int(raw)
++    except ValueError:
++        return default
++
++
++def apply_env_overrides(cfg: OmegaConf, phase: str):
++    """Minimal env-var overrides used by scripts/run_train_infer_cycles.sh.
++
++    Re-added after 2026-04-10 strict restore which replaced this file with
++    upstream and lost orchestrator integration. Only resume + end_epoch are
++    required for cycle mode to work.
++    """
++    cfg.TRAIN.END_EPOCH = _env_int("SOKE_TRAIN_END_EPOCH", cfg.TRAIN.END_EPOCH)
++    if phase == "train":
++        train_resume = os.environ.get("SOKE_TRAIN_RESUME", "").strip()
++        if train_resume:
++            cfg.TRAIN.RESUME = train_resume
++
++    data_root = os.environ.get("SOKENAR_DATA_ROOT", "").strip()
++    if data_root:
++        cfg.DATASET.H2S.ROOT = pjoin(data_root, "How2Sign")
++        cfg.DATASET.H2S.CSL_ROOT = pjoin(data_root, "CSL-Daily")
++        cfg.DATASET.H2S.PHOENIX_ROOT = pjoin(data_root, "Phoenix_2014T")
++        cfg.DATASET.H2S.MEAN_PATH = pjoin(data_root, "CSL-Daily", "mean.pt")
++        cfg.DATASET.H2S.STD_PATH = pjoin(data_root, "CSL-Daily", "std.pt")
++
++    checkpoint = os.environ.get("SOKENAR_CHECKPOINT", "").strip()
++    if phase == "test" and checkpoint:
++        cfg.TEST.CHECKPOINTS = checkpoint
++    return cfg
++
++
+ def resume_config(cfg: OmegaConf):
+     """
+     Resume model and wandb
+@@ -118,6 +155,22 @@ def parse_args(phase="train"):
+                            type=str,
+                            required=False,
+                            help="evaluation task type")
++        group.add_argument("--oracle_length_scale",
++                           type=float,
++                           required=False,
++                           help="diagnostic scale for SOKE-NAR oracle grid length")
++        group.add_argument("--linear_length_predictor",
++                           action="store_true",
++                           required=False,
++                           help="use the fitted text-units SOKE-NAR length baseline")
++        group.add_argument("--seed_value",
++                           type=int,
++                           required=False,
++                           help="override the experiment seed")
++        group.add_argument("--run_name",
++                           type=str,
++                           required=False,
++                           help="override the output run name")
+         group.add_argument("--nodebug",
+                            action="store_true",
+                            required=False,
+@@ -191,6 +244,19 @@ def parse_args(phase="train"):
+         cfg.DEVICE = params.device if params.device else cfg.DEVICE
+         cfg.NUM_NODES = params.num_nodes if params.num_nodes else cfg.NUM_NODES
+         cfg.model.params.task = params.task if params.task else cfg.model.params.task
++        if params.oracle_length_scale is not None:
++            OmegaConf.update(
++                cfg,
++                "lm.mbart_h2s_csl_phoenix_nar.params.oracle_length_scale",
++                params.oracle_length_scale,
++                merge=False,
++            )
++        if params.linear_length_predictor:
++            cfg.model.params.lm = cfg.lm.mbart_h2s_csl_phoenix_nar_length_linear
++        if params.seed_value is not None:
++            cfg.SEED_VALUE = params.seed_value
++        if params.run_name:
++            cfg.NAME = params.run_name
+         cfg.DEBUG = not params.nodebug if params.nodebug is not None else cfg.DEBUG
+ 
+         # Force no debug in test
+@@ -223,6 +289,9 @@ def parse_args(phase="train"):
+         cfg.LOGGER.WANDB.params.offline = True
+         cfg.LOGGER.VAL_EVERY_STEPS = 1
+         
++    # Env-var overrides (SOKE_TRAIN_RESUME, SOKE_TRAIN_END_EPOCH) — must run BEFORE resume_config
++    cfg = apply_env_overrides(cfg, phase)
++
+     # Resume config
+     cfg = resume_config(cfg)
+ 
+diff --git a/mGPT/data/H2S.py b/mGPT/data/H2S.py
+index b3d739f..7136406 100644
+--- a/mGPT/data/H2S.py
++++ b/mGPT/data/H2S.py
+@@ -71,6 +71,7 @@ class H2SDataModule(BASEDataModule):
+         # Additional parameters
+         self.hparams.debug = cfg.DEBUG
+         self.hparams.stage = cfg.TRAIN.STAGE
++        self.hparams.max_samples = cfg.EVAL.get('MAX_SAMPLES', cfg.TEST.get('MAX_SAMPLES', None))
+         self.hparams.w_vectorizer = WordVectorizer(
+             cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
+ 
+diff --git a/mGPT/data/__init__.py b/mGPT/data/__init__.py
+index 948f49c..31d0290 100644
+--- a/mGPT/data/__init__.py
++++ b/mGPT/data/__init__.py
+@@ -19,11 +19,49 @@ class BASEDataModule(pl.LightningDataModule):
+         sample_params.update(overrides)
+         return self.DatasetEval(**sample_params)
+ 
++    def _overfit_n(self):
++        try:
++            n = int(self.cfg.DATASET.get('OVERFIT_N', 0) or 0)
++        except Exception:
++            n = 0
++        return n if n > 0 else 0
++
++    def _apply_overfit(self, dataset, tag):
++        n = self._overfit_n()
++        if n <= 0 or dataset is None:
++            return dataset
++        # Datasets expose either `all_data` (list of dicts) or `name_list` (list of str)
++        if hasattr(dataset, 'all_data') and isinstance(dataset.all_data, list):
++            original = dataset.all_data
++            if len(original) == 0:
++                print(f"[OVERFIT_N={n}] {tag}: empty all_data, skipping")
++                return dataset
++            keyfn = lambda d: d.get('name', '') if isinstance(d, dict) else ''
++            truncated = sorted(original, key=keyfn)[:n]
++            dataset.all_data = truncated
++            names = [keyfn(d) for d in truncated]
++            print(f"[OVERFIT_N={n}] {tag}: truncated all_data {len(original)} -> {len(truncated)}")
++            print(f"[OVERFIT_N={n}] {tag}: names = {names}")
++            return dataset
++        if hasattr(dataset, 'name_list'):
++            original = list(dataset.name_list)
++            if len(original) == 0:
++                print(f"[OVERFIT_N={n}] {tag}: empty name_list, skipping")
++                return dataset
++            truncated = sorted(original)[:n]
++            dataset.name_list = truncated
++            print(f"[OVERFIT_N={n}] {tag}: truncated name_list {len(original)} -> {len(truncated)}")
++            print(f"[OVERFIT_N={n}] {tag}: names = {truncated}")
++            return dataset
++        print(f"[OVERFIT_N={n}] {tag}: dataset has neither all_data nor name_list, skipping")
++        return dataset
++
+     @property
+     def train_dataset(self):
+         if self._train_dataset is None:
+             self._train_dataset = self.Dataset(split=self.cfg.TRAIN.SPLIT,
+                                                **self.hparams)
++            self._apply_overfit(self._train_dataset, 'train')
+         return self._train_dataset
+ 
+     @property
+@@ -31,8 +69,12 @@ class BASEDataModule(pl.LightningDataModule):
+         if self._val_dataset is None:
+             params = self.hparams.copy()
+             params['code_path'] = None
+-            params['split'] = self.cfg.EVAL.SPLIT
++            if self._overfit_n() > 0:
++                params['split'] = self.cfg.TRAIN.SPLIT
++            else:
++                params['split'] = self.cfg.EVAL.SPLIT
+             self._val_dataset = self.DatasetEval(**params)
++            self._apply_overfit(self._val_dataset, 'val')
+         return self._val_dataset
+ 
+     @property
+@@ -42,8 +84,12 @@ class BASEDataModule(pl.LightningDataModule):
+             #                                       **self.hparams)
+             params = self.hparams.copy()
+             params['code_path'] = None
+-            params['split'] = self.cfg.TEST.SPLIT
++            if self._overfit_n() > 0:
++                params['split'] = self.cfg.TRAIN.SPLIT
++            else:
++                params['split'] = self.cfg.TEST.SPLIT
+             self._test_dataset = self.DatasetEval( **params)
++            self._apply_overfit(self._test_dataset, 'test')
+         return self._test_dataset
+ 
+     def setup(self, stage=None):
+@@ -58,10 +104,11 @@ class BASEDataModule(pl.LightningDataModule):
+         dataloader_options = self.dataloader_options.copy()
+         dataloader_options["batch_size"] = self.cfg.TRAIN.BATCH_SIZE
+         dataloader_options["num_workers"] = self.cfg.TRAIN.NUM_WORKERS
++        use_persistent_workers = dataloader_options["num_workers"] > 0
+         return DataLoader(
+             self.train_dataset,
+             shuffle=False,
+-            persistent_workers=True,
++            persistent_workers=use_persistent_workers,
+             **dataloader_options,
+         )
+ 
+@@ -71,9 +118,10 @@ class BASEDataModule(pl.LightningDataModule):
+             "batch_size"] = 1 if self.is_mm else self.cfg.TEST.BATCH_SIZE
+         dataloader_options["num_workers"] = self.cfg.TEST.NUM_WORKERS
+         dataloader_options["shuffle"] = False
++        use_persistent_workers = dataloader_options["num_workers"] > 0
+         return DataLoader(
+             self.test_dataset,
+-            persistent_workers=True,
++            persistent_workers=use_persistent_workers,
+             **dataloader_options,
+         )
+ 
+@@ -83,9 +131,10 @@ class BASEDataModule(pl.LightningDataModule):
+         dataloader_options["batch_size"] = self.cfg.EVAL.BATCH_SIZE
+         dataloader_options["num_workers"] = self.cfg.EVAL.NUM_WORKERS
+         dataloader_options["shuffle"] = False
++        use_persistent_workers = dataloader_options["num_workers"] > 0
+         return DataLoader(
+             self.val_dataset,
+-            persistent_workers=True,
++            persistent_workers=use_persistent_workers,
+             **dataloader_options,
+         )
+ 
+@@ -96,8 +145,9 @@ class BASEDataModule(pl.LightningDataModule):
+             "batch_size"] = 1 if self.is_mm else self.cfg.TEST.BATCH_SIZE
+         dataloader_options["num_workers"] = self.cfg.TEST.NUM_WORKERS
+         dataloader_options["shuffle"] = False
++        use_persistent_workers = dataloader_options["num_workers"] > 0
+         return DataLoader(
+             self.test_dataset,
+-            persistent_workers=True,
++            persistent_workers=use_persistent_workers,
+             **dataloader_options,
+         )
+diff --git a/mGPT/data/humanml/dataset_t2m.py b/mGPT/data/humanml/dataset_t2m.py
+index 1bb1ed8..8025e7e 100644
+--- a/mGPT/data/humanml/dataset_t2m.py
++++ b/mGPT/data/humanml/dataset_t2m.py
+@@ -42,6 +42,7 @@ class Text2MotionDataset(data.Dataset):
+         self.unit_length = unit_length
+         self.csl_root = kwargs.get('csl_root', None)
+         self.phoenix_root = kwargs.get('phoenix_root', None)
++        self.max_samples = kwargs.get('max_samples', None)
+ 
+         # Data mean and std
+         self.mean = mean
+@@ -102,6 +103,16 @@ class Text2MotionDataset(data.Dataset):
+             self.phoenix_len += len(self.ann)
+ 
+         # random.shuffle(self.all_data)
++        if self.max_samples is not None:
++            try:
++                cap = int(self.max_samples)
++            except Exception:
++                cap = None
++            if cap is not None and cap > 0:
++                self.all_data = self.all_data[:cap]
++                self.h2s_len = sum(1 for x in self.all_data if x.get('src') == 'how2sign')
++                self.csl_len = sum(1 for x in self.all_data if x.get('src') == 'csl')
++                self.phoenix_len = sum(1 for x in self.all_data if x.get('src') == 'phoenix')
+         print(f'Data loading done. All: {len(self.all_data)}, How2Sign: {self.h2s_len}, CSL: {self.csl_len}, Phoenix: {self.phoenix_len}')
+         self.nfeats = 133
+         # self.reset_max_len(self.max_length)
+@@ -151,4 +162,4 @@ class Text2MotionDataset(data.Dataset):
+ 
+ def sample(input,count):
+     ss=float(len(input))/count
+-    return [ input[int(math.floor(i*ss))] for i in range(count) ]
+\ No newline at end of file
++    return [ input[int(math.floor(i*ss))] for i in range(count) ]
+diff --git a/mGPT/data/humanml/dataset_t2m_cb.py b/mGPT/data/humanml/dataset_t2m_cb.py
+index c997571..55cf2ad 100644
+--- a/mGPT/data/humanml/dataset_t2m_cb.py
++++ b/mGPT/data/humanml/dataset_t2m_cb.py
+@@ -148,17 +148,48 @@ class Text2MotionDatasetCB(data.Dataset):
+     def __getitem__(self, idx):
+         data_idx = idx % len(self.all_data)
+         task_idx = idx // len(self.all_data)
+-        sample = self.all_data[data_idx]
+-        src = sample['src']
+-        # caption = sample['text']
+-        # m_tokens = sample['code']
+-
+-        if src == 'how2sign':
+-            _, caption, name, m_tokens = load_h2s_sample(sample, self.data_dir, need_pose=False, code_path=os.path.join(self.data_root, self.code_path), need_code=True)
+-        elif src == 'csl':
+-            _, caption, name, m_tokens = load_csl_sample(sample, self.csl_root, need_pose=False, code_path=os.path.join(self.data_root, self.code_path), need_code=True)
+-        elif src == 'phoenix':
+-            _, caption, name, m_tokens = load_phoenix_sample(sample, self.phoenix_root, need_pose=False, code_path=os.path.join(self.data_root, self.code_path), need_code=True)
++        sample = None
++        caption = None
++        name = None
++        m_tokens = None
++        invalid_seen = 0
++
++        # Robust fallback: some annotations point to samples without valid tokens.
++        # Try subsequent samples instead of crashing the dataloader worker.
++        for off in range(len(self.all_data)):
++            current_idx = (data_idx + off) % len(self.all_data)
++            sample = self.all_data[current_idx]
++            src = sample['src']
++
++            if src == 'how2sign':
++                _, caption, name, m_tokens = load_h2s_sample(
++                    sample, self.data_dir, need_pose=False,
++                    code_path=os.path.join(self.data_root, self.code_path), need_code=True
++                )
++            elif src == 'csl':
++                _, caption, name, m_tokens = load_csl_sample(
++                    sample, self.csl_root, need_pose=False,
++                    code_path=os.path.join(self.data_root, self.code_path), need_code=True
++                )
++            elif src == 'phoenix':
++                _, caption, name, m_tokens = load_phoenix_sample(
++                    sample, self.phoenix_root, need_pose=False,
++                    code_path=os.path.join(self.data_root, self.code_path), need_code=True
++                )
++            else:
++                m_tokens = None
++
++            valid = isinstance(m_tokens, np.ndarray) and m_tokens.ndim >= 1 and m_tokens.shape[0] > 0
++            if valid:
++                break
++            invalid_seen += 1
++            m_tokens = None
++
++        if m_tokens is None:
++            raise RuntimeError(
++                f"No valid token sample found after scanning {len(self.all_data)} items "
++                f"(starting_idx={data_idx}, invalid_seen={invalid_seen})"
++            )
+ 
+         all_captions = [caption]
+         # print(m_tokens.shape)
+diff --git a/mGPT/metrics/dtw.py b/mGPT/metrics/dtw.py
+index 1235bac..676c7ac 100644
+--- a/mGPT/metrics/dtw.py
++++ b/mGPT/metrics/dtw.py
+@@ -63,6 +63,57 @@ def dtw(x, y, dist, warp=1, w=inf, s=1.0):
+         path = _traceback(D0)
+     return D1[-1, -1], C, D1, path
+ 
++
++def dtw_from_cost(cost, warp=1, w=inf, s=1.0):
++    """
++    Computes Dynamic Time Warping from a precomputed pairwise cost matrix.
++
++    :param array cost: N1*N2 matrix with pointwise distances.
++    :param int warp: how many shifts are computed.
++    :param int w: window size limiting the maximal distance between indices of matched entries |i,j|.
++    :param float s: weight applied on off-diagonal moves.
++    Returns the minimum distance, the input cost matrix, the accumulated cost matrix, and the wrap path.
++    """
++    C = np.asarray(cost)
++    assert C.ndim == 2
++    r, c = C.shape
++    assert r > 0 and c > 0
++    assert isinf(w) or (w >= abs(r - c))
++    assert s > 0
++
++    if not isinf(w):
++        D0 = full((r + 1, c + 1), inf)
++        for i in range(1, r + 1):
++            D0[i, max(1, i - w):min(c + 1, i + w + 1)] = 0
++        D0[0, 0] = 0
++    else:
++        D0 = zeros((r + 1, c + 1))
++        D0[0, 1:] = inf
++        D0[1:, 0] = inf
++
++    D1 = D0[1:, 1:]
++    D1[...] = C
++
++    jrange = range(c)
++    for i in range(r):
++        if not isinf(w):
++            jrange = range(max(0, i - w), min(c, i + w + 1))
++        for j in jrange:
++            min_list = [D0[i, j]]
++            for k in range(1, warp + 1):
++                i_k = min(i + k, r)
++                j_k = min(j + k, c)
++                min_list += [D0[i_k, j] * s, D0[i, j_k] * s]
++            D1[i, j] += min(min_list)
++
++    if r == 1:
++        path = zeros(c), range(c)
++    elif c == 1:
++        path = range(r), zeros(r)
++    else:
++        path = _traceback(D0)
++    return D1[-1, -1], C, D1, path
++
+ def _traceback(D):
+     i, j = array(D.shape) - 2
+     p, q = [i], [j]
+@@ -306,4 +357,4 @@ if __name__ == '__main__':
+     print(func1(42.23, 19.85, 34.62))
+     print(func1(35.27, 21.72, 31.88))
+     print(func1(32.29, 19.67, 29.05))
+-    print(func1(20.14, 19.33, 23.98))
+\ No newline at end of file
++    print(func1(20.14, 19.33, 23.98))
+diff --git a/mGPT/metrics/t2m.py b/mGPT/metrics/t2m.py
+index 8d48d0c..c9ef013 100644
+--- a/mGPT/metrics/t2m.py
++++ b/mGPT/metrics/t2m.py
+@@ -1,10 +1,11 @@
+ from typing import List
+ import os
++import numpy as np
+ import torch
+ from torch import Tensor
+ from torchmetrics import Metric
+ from .utils import *
+-from mGPT.metrics.dtw import dtw, l2_dist, l1_dist, l2_dist_align
++from mGPT.metrics.dtw import dtw, dtw_from_cost, l2_dist, l1_dist, l2_dist_align
+ from mGPT.metrics.fid import smpl_fid
+ from functools import partial
+ from mGPT.utils.human_models import rigid_align, rigid_align_torch_batch, smpl_x
+@@ -12,6 +13,23 @@ from collections import defaultdict
+ 
+ 
+ class TM2TMetrics(Metric):
++    # Table 1 references from SOKE paper (ICCV 2025), row "SOKE (ours)".
++    # Source file in repo: docs/SOKE_ICCV2025_paper.pdf
++    PAPER_TABLE1_REFERENCE = {
++        "how2sign_DTW_PA_JPE_body": 6.82,
++        "how2sign_DTW_PA_JPE_hand": 2.35,
++        "how2sign_DTW_JPE_body": 7.75,
++        "how2sign_DTW_JPE_hand": 10.08,
++        "csl_DTW_PA_JPE_body": 6.24,
++        "csl_DTW_PA_JPE_hand": 1.71,
++        "csl_DTW_JPE_body": 7.38,
++        "csl_DTW_JPE_hand": 9.68,
++        "phoenix_DTW_PA_JPE_body": 4.77,
++        "phoenix_DTW_PA_JPE_hand": 1.38,
++        "phoenix_DTW_JPE_body": 6.04,
++        "phoenix_DTW_JPE_hand": 7.72,
++    }
++
+     def __init__(self,
+                  cfg,
+                  dataname='humanml3d',
+@@ -56,6 +74,24 @@ class TM2TMetrics(Metric):
+         self.add_state("how2sign_DTW_MPJPE_PA_body",
+                        default=torch.tensor([0.0]),
+                        dist_reduce_fx="sum")
++        self.add_state("how2sign_DTW_JPE_body",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("how2sign_DTW_PA_JPE_body",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("how2sign_DTW_JPE_lhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("how2sign_DTW_PA_JPE_lhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("how2sign_DTW_JPE_rhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("how2sign_DTW_PA_JPE_rhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
+ 
+         self.add_state("csl_DTW_MPJPE_PA_lhand",
+                        default=torch.tensor([0.0]),
+@@ -66,6 +102,24 @@ class TM2TMetrics(Metric):
+         self.add_state("csl_DTW_MPJPE_PA_body",
+                        default=torch.tensor([0.0]),
+                        dist_reduce_fx="sum")
++        self.add_state("csl_DTW_JPE_body",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("csl_DTW_PA_JPE_body",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("csl_DTW_JPE_lhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("csl_DTW_PA_JPE_lhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("csl_DTW_JPE_rhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("csl_DTW_PA_JPE_rhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
+         
+         self.add_state("phoenix_DTW_MPJPE_PA_lhand",
+                        default=torch.tensor([0.0]),
+@@ -76,13 +130,94 @@ class TM2TMetrics(Metric):
+         self.add_state("phoenix_DTW_MPJPE_PA_body",
+                        default=torch.tensor([0.0]),
+                        dist_reduce_fx="sum")
++        self.add_state("phoenix_DTW_JPE_body",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("phoenix_DTW_PA_JPE_body",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("phoenix_DTW_JPE_lhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("phoenix_DTW_PA_JPE_lhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("phoenix_DTW_JPE_rhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
++        self.add_state("phoenix_DTW_PA_JPE_rhand",
++                       default=torch.tensor([0.0]),
++                       dist_reduce_fx="sum")
+ 
+         self.MR_metrics = ["how2sign_DTW_MPJPE_PA_lhand", "how2sign_DTW_MPJPE_PA_rhand", "how2sign_DTW_MPJPE_PA_body", 
+                            "csl_DTW_MPJPE_PA_lhand", "csl_DTW_MPJPE_PA_rhand", "csl_DTW_MPJPE_PA_body",
+                            "phoenix_DTW_MPJPE_PA_lhand", "phoenix_DTW_MPJPE_PA_rhand", "phoenix_DTW_MPJPE_PA_body"]
+ 
+-        # All metric
+-        self.metrics = self.MR_metrics
++        self.paper_metrics = []
++        for d in ["how2sign", "csl", "phoenix"]:
++            self.paper_metrics.extend([
++                f"{d}_DTW_PA_JPE_body",
++                f"{d}_DTW_PA_JPE_hand",
++                f"{d}_DTW_JPE_body",
++                f"{d}_DTW_JPE_hand",
++            ])
++
++        # All metric (legacy + paper-aligned explicit metrics)
++        self.metrics = self.MR_metrics + self.paper_metrics
++        self.dtw_stride = max(1, int(cfg.METRIC.get("DTW_STRIDE", 1)))
++        self.dtw_max_frames = int(cfg.METRIC.get("DTW_MAX_FRAMES", 0) or 0)
++        self.dtw_window = int(cfg.METRIC.get("DTW_WINDOW", 0) or 0)
++        self.exact_dtw_backend = str(cfg.METRIC.get("EXACT_DTW_BACKEND", "legacy")).lower()
++        self.exact_dtw_chunk = max(1, int(cfg.METRIC.get("EXACT_DTW_CHUNK", 128)))
++        self._hand_regressor_cache = {}
++
++    def _get_hand_regressor(self, side: str, ref_tensor: Tensor) -> Tensor:
++        key = (side, str(ref_tensor.device), str(ref_tensor.dtype))
++        if key not in self._hand_regressor_cache:
++            self._hand_regressor_cache[key] = smpl_x.orig_hand_regressor[side].to(
++                device=ref_tensor.device, dtype=ref_tensor.dtype)
++        return self._hand_regressor_cache[key]
++
++    def _pairwise_cost_torch(self,
++                             x: Tensor,
++                             y: Tensor,
++                             wanted_idx=None,
++                             align_idx=0) -> Tensor:
++        # x: [Tx, J, 3], y: [Ty, J, 3]
++        tx, ty = x.shape[0], y.shape[0]
++        costs = torch.empty((tx, ty), device=x.device, dtype=x.dtype)
++
++        if wanted_idx is not None:
++            y_eval = y[:, wanted_idx, :]
++        else:
++            y_eval = y
++
++        for i in range(tx):
++            x_i = x[i].unsqueeze(0).expand(ty, -1, -1)
++            if align_idx is None:
++                x_i = rigid_align_torch_batch(x_i, y)
++            else:
++                x_i = x_i - x_i[:, align_idx:align_idx + 1, :] + y[:, align_idx:align_idx + 1, :]
++
++            if wanted_idx is not None:
++                x_eval = x_i[:, wanted_idx, :]
++            else:
++                x_eval = x_i
++
++            d = torch.sqrt(torch.sum((x_eval - y_eval) ** 2, dim=-1)).mean(dim=-1)
++            costs[i] = d
++
++        return costs
++
++    def _dtw_torch_exact(self,
++                         x: Tensor,
++                         y: Tensor,
++                         wanted_idx=None,
++                         align_idx=0,
++                         w=np.inf) -> float:
++        # Compute exact pairwise cost on torch (GPU if available), then exact DTW DP on CPU.
++        cost = self._pairwise_cost_torch(x, y, wanted_idx=wanted_idx, align_idx=align_idx)
++        return float(dtw_from_cost(cost.detach().float().cpu().numpy(), w=w)[0])
+ 
+         
+     @torch.no_grad()
+@@ -90,6 +225,16 @@ class TM2TMetrics(Metric):
+ 
+         mr_metrics = {}
+         for name in self.metrics:
++            if name.endswith("_hand"):
++                d = name.split('_')[0]
++                if "DTW_PA_JPE" in name:
++                    lh = getattr(self, f"{d}_DTW_PA_JPE_lhand")
++                    rh = getattr(self, f"{d}_DTW_PA_JPE_rhand")
++                else:
++                    lh = getattr(self, f"{d}_DTW_JPE_lhand")
++                    rh = getattr(self, f"{d}_DTW_JPE_rhand")
++                mr_metrics[name] = (lh + rh) / 2.0 / max(getattr(self, f'{d}_count_seq'), 1e-6)
++                continue
+             d = name.split('_')[0]
+             mr_metrics[name] = getattr(self, name) / max(getattr(self, f'{d}_count_seq'), 1e-6)
+ 
+@@ -115,59 +260,145 @@ class TM2TMetrics(Metric):
+ 
+         B = len(lengths)
+         BT, N = joints_rst.shape[:2]
+-        joints_rst = joints_rst.reshape(B, BT//B, N, 3)
++        joints_rst = joints_rst.reshape(B, BT//B, N, 3).detach()
+         BT, N = joints_ref.shape[:2]
+-        joints_ref = joints_ref.reshape(B, BT//B, N, 3)
++        joints_ref = joints_ref.reshape(B, BT//B, N, 3).detach()
+ 
+         BT, N = vertices_rst.shape[:2]
+-        vertices_rst = vertices_rst.reshape(B, BT//B, N, 3)
++        vertices_rst = vertices_rst.reshape(B, BT//B, N, 3).detach()
+         BT, N = vertices_ref.shape[:2]
+-        vertices_ref = vertices_ref.reshape(B, BT//B, N, 3)
++        vertices_ref = vertices_ref.reshape(B, BT//B, N, 3).detach()
++
++        use_torch_exact = (self.exact_dtw_backend == 'torch') and split in ['val', 'test']
++        if not use_torch_exact:
++            # Legacy path: preserve historical behavior.
++            joints_rst_np = joints_rst.cpu().numpy()
++            joints_ref_np = joints_ref.cpu().numpy()
++            vertices_rst_cpu = vertices_rst.cpu()
++            vertices_ref_cpu = vertices_ref.cpu()
++        else:
++            joints_rst_np = joints_ref_np = None
++            vertices_rst_cpu = vertices_ref_cpu = None
+ 
+-        # avoid cuda error of DDP in pampjpe
+-        joints_rst = joints_rst.detach().cpu().numpy()
+-        joints_ref = joints_ref.detach().cpu().numpy()
+-        vertices_rst = vertices_rst.detach().cpu()
+-        vertices_ref = vertices_ref.detach().cpu()
++        def _subsample_temporal_np(seq):
++            if self.dtw_max_frames > 0 and len(seq) > self.dtw_max_frames:
++                idx = np.linspace(0, len(seq) - 1, num=self.dtw_max_frames, dtype=int)
++                seq = seq[idx]
++            if self.dtw_stride > 1:
++                seq = seq[::self.dtw_stride]
++            return seq
++
++        def _subsample_temporal_torch(seq):
++            if self.dtw_max_frames > 0 and seq.shape[0] > self.dtw_max_frames:
++                idx = torch.linspace(0, seq.shape[0] - 1, steps=self.dtw_max_frames, device=seq.device).long()
++                seq = seq[idx]
++            if self.dtw_stride > 1:
++                seq = seq[::self.dtw_stride]
++            return seq
++
++        def _dtw_window(x_len, y_len):
++            if self.dtw_window <= 0:
++                return np.inf
++            return max(self.dtw_window, abs(x_len - y_len))
+ 
+-        part_lst = ['body', 'lhand', 'rhand']  #save time for validation during training
+         for i in range(len(lengths)):
+             cur_len = lengths[i]
+             rst_len = lengths_rst[i]
+-            mesh_gt = vertices_ref[i, :cur_len]
+-            mesh_out = vertices_rst[i, :rst_len]
+-            joints_rst_cur = joints_rst[i, :rst_len] 
+-            joints_ref_cur = joints_ref[i, :cur_len]
+             data_src = src[i]
+             cur_name = name[i]
+-            setattr(self, f"{data_src}_count_seq", getattr(self, f"{data_src}_count_seq")+1)
+-            # print(cur_len, rst_len)
++            setattr(self, f"{data_src}_count_seq", getattr(self, f"{data_src}_count_seq") + 1)
+ 
+             if split in ['val', 'test']:
+-                '''
+-                Note that when align_idx=0, the metric is DTW-JPE; when align_idx=None, the metric is DTW-PA-JPE. But we didn't modify the variable names.
+-                '''
+                 joint_idx = self.joint_part2idx['upper_body']
+-                dist_func = partial(l2_dist_align, wanted=joint_idx, align_idx=0)
+-                value = dtw(joints_rst_cur, joints_ref_cur, dist_func)[0]
+-                setattr(self, f'{data_src}_DTW_MPJPE_PA_body', getattr(self, f'{data_src}_DTW_MPJPE_PA_body') + value)
+-                self.name2scores[cur_name][f'{data_src}_DTW_MPJPE_PA_body'] = value
+-                # print('body: ', value)
+-
+-                joint_idx = self.joint_part2idx['lhand']
+-                joint_gt_lhand = torch.matmul(smpl_x.orig_hand_regressor['left'], mesh_gt).float().numpy()
+-                joint_out_lhand = torch.matmul(smpl_x.orig_hand_regressor['left'], mesh_out).float().numpy()
+-                dist_func = partial(l2_dist_align, align_idx=0)
+-                value = dtw(joint_out_lhand, joint_gt_lhand, dist_func)[0]
+-                setattr(self, f"{data_src}_DTW_MPJPE_PA_lhand", getattr(self, f"{data_src}_DTW_MPJPE_PA_lhand") + value)
+-                self.name2scores[cur_name][f"{data_src}_DTW_MPJPE_PA_lhand"] = value
+-                # print('lhand: ', value)
+-
+-                joint_idx = self.joint_part2idx['rhand']
+-                joint_gt_rhand = torch.matmul(smpl_x.orig_hand_regressor['right'], mesh_gt).float().numpy()
+-                joint_out_rhand = torch.matmul(smpl_x.orig_hand_regressor['right'], mesh_out).float().numpy()
+-                dist_func = partial(l2_dist_align, align_idx=0)
+-                value = dtw(joint_out_rhand, joint_gt_rhand, dist_func)[0]
+-                setattr(self, f"{data_src}_DTW_MPJPE_PA_rhand", getattr(self, f"{data_src}_DTW_MPJPE_PA_rhand") + value)
+-                self.name2scores[cur_name][f"{data_src}_DTW_MPJPE_PA_rhand"] = value
+-        
+\ No newline at end of file
++                if use_torch_exact:
++                    joints_rst_cur = _subsample_temporal_torch(joints_rst[i, :rst_len])
++                    joints_ref_cur = _subsample_temporal_torch(joints_ref[i, :cur_len])
++                    body_w = _dtw_window(joints_rst_cur.shape[0], joints_ref_cur.shape[0])
++                    value_body_jpe = self._dtw_torch_exact(joints_rst_cur, joints_ref_cur,
++                                                           wanted_idx=joint_idx, align_idx=0, w=body_w)
++                    value_body_pa = self._dtw_torch_exact(joints_rst_cur, joints_ref_cur,
++                                                          wanted_idx=joint_idx, align_idx=None, w=body_w)
++                else:
++                    joints_rst_cur = _subsample_temporal_np(joints_rst_np[i, :rst_len])
++                    joints_ref_cur = _subsample_temporal_np(joints_ref_np[i, :cur_len])
++                    body_w = _dtw_window(len(joints_rst_cur), len(joints_ref_cur))
++                    dist_func_jpe = partial(l2_dist_align, wanted=joint_idx, align_idx=0)
++                    dist_func_pa = partial(l2_dist_align, wanted=joint_idx, align_idx=None)
++                    value_body_jpe = dtw(joints_rst_cur, joints_ref_cur, dist_func_jpe, w=body_w)[0]
++                    value_body_pa = dtw(joints_rst_cur, joints_ref_cur, dist_func_pa, w=body_w)[0]
++
++                # Keep legacy behavior from upstream:
++                # *_DTW_MPJPE_PA_* stores the JPE-style value (align_idx=0).
++                # Paper-canonical explicit keys are logged separately below.
++                setattr(self, f'{data_src}_DTW_MPJPE_PA_body',
++                        getattr(self, f'{data_src}_DTW_MPJPE_PA_body') + value_body_jpe)
++                setattr(self, f'{data_src}_DTW_JPE_body',
++                        getattr(self, f'{data_src}_DTW_JPE_body') + value_body_jpe)
++                setattr(self, f'{data_src}_DTW_PA_JPE_body',
++                        getattr(self, f'{data_src}_DTW_PA_JPE_body') + value_body_pa)
++                self.name2scores[cur_name][f'{data_src}_DTW_MPJPE_PA_body'] = value_body_jpe
++                self.name2scores[cur_name][f'{data_src}_DTW_JPE_body'] = value_body_jpe
++                self.name2scores[cur_name][f'{data_src}_DTW_PA_JPE_body'] = value_body_pa
++
++                if use_torch_exact:
++                    mesh_gt = vertices_ref[i, :cur_len]
++                    mesh_out = vertices_rst[i, :rst_len]
++                    left_reg = self._get_hand_regressor('left', mesh_gt)
++                    right_reg = self._get_hand_regressor('right', mesh_gt)
++                    joint_gt_lhand = torch.matmul(left_reg, mesh_gt)
++                    joint_out_lhand = torch.matmul(left_reg, mesh_out)
++                    joint_gt_rhand = torch.matmul(right_reg, mesh_gt)
++                    joint_out_rhand = torch.matmul(right_reg, mesh_out)
++
++                    lhand_rst = _subsample_temporal_torch(joint_out_lhand)
++                    lhand_ref = _subsample_temporal_torch(joint_gt_lhand)
++                    lhand_w = _dtw_window(lhand_rst.shape[0], lhand_ref.shape[0])
++                    value_lhand_jpe = self._dtw_torch_exact(lhand_rst, lhand_ref, align_idx=0, w=lhand_w)
++                    value_lhand_pa = self._dtw_torch_exact(lhand_rst, lhand_ref, align_idx=None, w=lhand_w)
++
++                    rhand_rst = _subsample_temporal_torch(joint_out_rhand)
++                    rhand_ref = _subsample_temporal_torch(joint_gt_rhand)
++                    rhand_w = _dtw_window(rhand_rst.shape[0], rhand_ref.shape[0])
++                    value_rhand_jpe = self._dtw_torch_exact(rhand_rst, rhand_ref, align_idx=0, w=rhand_w)
++                    value_rhand_pa = self._dtw_torch_exact(rhand_rst, rhand_ref, align_idx=None, w=rhand_w)
++                else:
++                    mesh_gt = vertices_ref_cpu[i, :cur_len]
++                    mesh_out = vertices_rst_cpu[i, :rst_len]
++                    joint_gt_lhand = torch.matmul(smpl_x.orig_hand_regressor['left'], mesh_gt).float().numpy()
++                    joint_out_lhand = torch.matmul(smpl_x.orig_hand_regressor['left'], mesh_out).float().numpy()
++                    lhand_rst = _subsample_temporal_np(joint_out_lhand)
++                    lhand_ref = _subsample_temporal_np(joint_gt_lhand)
++                    lhand_w = _dtw_window(len(lhand_rst), len(lhand_ref))
++                    dist_func_jpe = partial(l2_dist_align, align_idx=0)
++                    dist_func_pa = partial(l2_dist_align, align_idx=None)
++                    value_lhand_jpe = dtw(lhand_rst, lhand_ref, dist_func_jpe, w=lhand_w)[0]
++                    value_lhand_pa = dtw(lhand_rst, lhand_ref, dist_func_pa, w=lhand_w)[0]
++
++                    joint_gt_rhand = torch.matmul(smpl_x.orig_hand_regressor['right'], mesh_gt).float().numpy()
++                    joint_out_rhand = torch.matmul(smpl_x.orig_hand_regressor['right'], mesh_out).float().numpy()
++                    rhand_rst = _subsample_temporal_np(joint_out_rhand)
++                    rhand_ref = _subsample_temporal_np(joint_gt_rhand)
++                    rhand_w = _dtw_window(len(rhand_rst), len(rhand_ref))
++                    value_rhand_jpe = dtw(rhand_rst, rhand_ref, dist_func_jpe, w=rhand_w)[0]
++                    value_rhand_pa = dtw(rhand_rst, rhand_ref, dist_func_pa, w=rhand_w)[0]
++
++                setattr(self, f"{data_src}_DTW_MPJPE_PA_lhand",
++                        getattr(self, f"{data_src}_DTW_MPJPE_PA_lhand") + value_lhand_jpe)
++                setattr(self, f"{data_src}_DTW_JPE_lhand",
++                        getattr(self, f"{data_src}_DTW_JPE_lhand") + value_lhand_jpe)
++                setattr(self, f"{data_src}_DTW_PA_JPE_lhand",
++                        getattr(self, f"{data_src}_DTW_PA_JPE_lhand") + value_lhand_pa)
++                self.name2scores[cur_name][f"{data_src}_DTW_MPJPE_PA_lhand"] = value_lhand_jpe
++                self.name2scores[cur_name][f"{data_src}_DTW_JPE_lhand"] = value_lhand_jpe
++                self.name2scores[cur_name][f"{data_src}_DTW_PA_JPE_lhand"] = value_lhand_pa
++
++                setattr(self, f"{data_src}_DTW_MPJPE_PA_rhand",
++                        getattr(self, f"{data_src}_DTW_MPJPE_PA_rhand") + value_rhand_jpe)
++                setattr(self, f"{data_src}_DTW_JPE_rhand",
++                        getattr(self, f"{data_src}_DTW_JPE_rhand") + value_rhand_jpe)
++                setattr(self, f"{data_src}_DTW_PA_JPE_rhand",
++                        getattr(self, f"{data_src}_DTW_PA_JPE_rhand") + value_rhand_pa)
++                self.name2scores[cur_name][f"{data_src}_DTW_MPJPE_PA_rhand"] = value_rhand_jpe
++                self.name2scores[cur_name][f"{data_src}_DTW_JPE_rhand"] = value_rhand_jpe
++                self.name2scores[cur_name][f"{data_src}_DTW_PA_JPE_rhand"] = value_rhand_pa
++        
+diff --git a/mGPT/models/base.py b/mGPT/models/base.py
+index 9c1a8fc..07e9965 100644
+--- a/mGPT/models/base.py
++++ b/mGPT/models/base.py
+@@ -12,6 +12,22 @@ import json, pickle
+ from copy import deepcopy
+ import torch.distributed as dist
+ 
++WANDB_MINIMAL_METRICS_ALLOWLIST = {
++    # Paper-comparable metrics (body/hand, JPE + PA-JPE) for all datasets.
++    "how2sign_DTW_PA_JPE_body",
++    "how2sign_DTW_PA_JPE_hand",
++    "how2sign_DTW_JPE_body",
++    "how2sign_DTW_JPE_hand",
++    "csl_DTW_PA_JPE_body",
++    "csl_DTW_PA_JPE_hand",
++    "csl_DTW_JPE_body",
++    "csl_DTW_JPE_hand",
++    "phoenix_DTW_PA_JPE_body",
++    "phoenix_DTW_PA_JPE_hand",
++    "phoenix_DTW_JPE_body",
++    "phoenix_DTW_JPE_hand",
++}
++
+ 
+ class BaseModel(LightningModule):
+     def __init__(self, *args, **kwargs):
+@@ -95,22 +111,32 @@ class BaseModel(LightningModule):
+         # print(f'{dist.get_rank()}: val epoch end')
+ 
+     def on_test_epoch_end(self):
++        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+         #print before sync
+         if 'lm' in self.hparams.stage:
+             name2scores = getattr(self.metrics.TM2TMetrics, 'name2scores')
+-            metrics = ["how2sign_DTW_MPJPE_PA_lhand", "how2sign_DTW_MPJPE_PA_rhand", "how2sign_DTW_MPJPE_PA_body", 
+-                           "csl_DTW_MPJPE_PA_lhand", "csl_DTW_MPJPE_PA_rhand", "csl_DTW_MPJPE_PA_body",
+-                           "phoenix_DTW_MPJPE_PA_lhand", "phoenix_DTW_MPJPE_PA_rhand", "phoenix_DTW_MPJPE_PA_body"]
++            metrics = [
++                "how2sign_DTW_PA_JPE_body", "how2sign_DTW_PA_JPE_hand",
++                "how2sign_DTW_JPE_body", "how2sign_DTW_JPE_hand",
++                "csl_DTW_PA_JPE_body", "csl_DTW_PA_JPE_hand",
++                "csl_DTW_JPE_body", "csl_DTW_JPE_hand",
++                "phoenix_DTW_PA_JPE_body", "phoenix_DTW_PA_JPE_hand",
++                "phoenix_DTW_JPE_body", "phoenix_DTW_JPE_hand",
++            ]
+             scores, count = {}, {}
+             for m in metrics:
+                 scores[m] = count[m] = 0
+             for name, value_dict in name2scores.items():
+                 for n, val in value_dict.items():
++                    # Be robust to additional legacy/per-sample keys emitted by metrics.
++                    if n not in scores:
++                        scores[n] = 0
++                        count[n] = 0
+                     scores[n] = scores[n] + val
+                     count[n] = count[n] + 1
+             for k in scores.keys():
+                 scores[k] = scores[k] / max(count[k], 1)
+-            print('rank: ', torch.distributed.get_rank(), scores)
++            print('rank: ', rank, scores)
+ 
+         # Log metrics
+         dico = self.metrics_log_dict()
+@@ -120,7 +146,7 @@ class BaseModel(LightningModule):
+         # self.save_npy(self.test_step_outputs)
+ 
+         # save prediction
+-        save_dir = os.path.join(self.output_dir, f'{self.hparams.cfg.TEST.SPLIT}_rank_'+str(torch.distributed.get_rank()))
++        save_dir = os.path.join(self.output_dir, f'{self.hparams.cfg.TEST.SPLIT}_rank_'+str(rank))
+         os.makedirs(save_dir, exist_ok=True)
+         if 'lm' in self.hparams.stage:
+             with open(os.path.join(save_dir, 'test_scores.json'), 'w') as f:
+@@ -177,14 +203,16 @@ class BaseModel(LightningModule):
+ 
+         # Compute all metrics
+         metrics_log_dict = {}
++        minimal_only = bool(
++            getattr(self.hparams.cfg.LOGGER, "MINIMAL_METRICS_ONLY", False))
+         for metric in metrics_dicts:
+             metrics_dict = getattr(
+                 self.metrics,
+                 metric).compute(sanity_flag=self.trainer.sanity_checking)
+-            metrics_log_dict.update({
+-                f"Metrics/{metric}": value.item()
+-                for metric, value in metrics_dict.items()
+-            })
++            for metric_name, value in metrics_dict.items():
++                if minimal_only and metric_name not in WANDB_MINIMAL_METRICS_ALLOWLIST:
++                    continue
++                metrics_log_dict[f"Metrics/{metric_name}"] = value.item()
+ 
+         return metrics_log_dict
+     
+diff --git a/mGPT/models/mgpt.py b/mGPT/models/mgpt.py
+index 13d08f2..4fb0269 100644
+--- a/mGPT/models/mgpt.py
++++ b/mGPT/models/mgpt.py
+@@ -158,6 +158,79 @@ class MotionGPT(BaseModel):
+         # outputs = self.t2m_gpt.generate(texts)
+         return {'outputs': outputs}
+ 
++    def _log_length_predictions(self, predicted_token_lengths, lengths, src):
++        predicted_token_lengths = predicted_token_lengths.to(self.device)
++        target_token_lengths = torch.tensor(
++            [max(1, int(round(float(length) / self.lm.down_t))) for length in lengths],
++            dtype=torch.long,
++            device=self.device,
++        )
++        errors = predicted_token_lengths - target_token_lengths
++        abs_errors = errors.abs().float()
++        length_ratios = (
++            predicted_token_lengths.float()
++            / target_token_lengths.float().clamp_min(1.0)
++        )
++        batch_size = len(lengths)
++        self.log(
++            "length/mae_tokens_val",
++            abs_errors.mean(),
++            on_step=False,
++            on_epoch=True,
++            batch_size=batch_size,
++            sync_dist=True,
++        )
++        for tolerance in (1, 2, 5):
++            self.log(
++                f"length/acc_within_{tolerance}_val",
++                (abs_errors <= tolerance).float().mean(),
++                on_step=False,
++                on_epoch=True,
++                batch_size=batch_size,
++                sync_dist=True,
++            )
++        for dataset_name in ("csl", "phoenix"):
++            dataset_mask = torch.tensor(
++                [source == dataset_name for source in src],
++                dtype=torch.bool,
++                device=self.device,
++            )
++            if dataset_mask.any():
++                dataset_batch = int(dataset_mask.sum())
++                self.log(
++                    f"length/bias_{dataset_name}_val",
++                    errors[dataset_mask].float().mean(),
++                    on_step=False,
++                    on_epoch=True,
++                    batch_size=dataset_batch,
++                    sync_dist=True,
++                )
++                self.log(
++                    f"length/ratio_{dataset_name}_val",
++                    length_ratios[dataset_mask].mean(),
++                    on_step=False,
++                    on_epoch=True,
++                    batch_size=dataset_batch,
++                    sync_dist=True,
++                )
++                self.log(
++                    f"length/under_75pct_{dataset_name}_val",
++                    (length_ratios[dataset_mask] < 0.75).float().mean(),
++                    on_step=False,
++                    on_epoch=True,
++                    batch_size=dataset_batch,
++                    sync_dist=True,
++                )
++
++    @torch.no_grad()
++    def val_length_forward(self, batch):
++        predicted_token_lengths, _ = self.lm.predict_token_lengths(
++            batch["text"], batch["src"], batch["name"]
++        )
++        self._log_length_predictions(
++            predicted_token_lengths, batch["length"], batch["src"]
++        )
++
+     @torch.no_grad()
+     def val_t2m_forward(self, batch, vis=False):
+         feats_ref = batch["motion"]
+@@ -203,6 +276,11 @@ class MotionGPT(BaseModel):
+         outputs_tokens = gen_results['outputs_tokens']
+         outputs_tokens_hand = gen_results['outputs_tokens_hand']
+         outputs_tokens_rhand = gen_results['outputs_tokens_rhand']
++        predicted_token_lengths = gen_results.get('predicted_token_lengths')
++        if predicted_token_lengths is not None:
++            self._log_length_predictions(
++                predicted_token_lengths, lengths, batch["src"]
++            )
+ 
+         max_len = max(map(len, outputs_tokens))
+         if outputs_tokens_hand is not None:
+@@ -587,6 +665,9 @@ class MotionGPT(BaseModel):
+                         )
+             elif self.hparams.stage in ["lm_instruct", "lm_pretrain", "lm_rl"]:
+                 if self.hparams.task == "t2m":
++                    if getattr(self.lm, "length_only_training", False):
++                        self.val_length_forward(batch)
++                        return loss
+                     rs_set = self.val_t2m_forward(batch)
+                     getattr(self.metrics, 'TM2TMetrics').update(
+                             feats_rst=rs_set["m_rst"],
+diff --git a/mGPT/utils/human_models.py b/mGPT/utils/human_models.py
+index 90cae45..f9a6f7d 100644
+--- a/mGPT/utils/human_models.py
++++ b/mGPT/utils/human_models.py
+@@ -3,7 +3,6 @@ import torch
+ import os.path as osp
+ import smplx
+ import pickle
+-import copy
+ import json
+ from collections import defaultdict
+ 
+@@ -213,13 +212,20 @@ class SMPLX(object):
+ smpl_x = SMPLX()
+ # smpl = SMPL()
+ 
++_SMPLX_LAYER_CACHE = {}
++
++def _get_cached_smplx_layer(device):
++    cache_key = str(device)
++    if cache_key not in _SMPLX_LAYER_CACHE:
++        _SMPLX_LAYER_CACHE[cache_key] = smpl_x.layer['neutral'].to(device)
++    return _SMPLX_LAYER_CACHE[cache_key]
+ 
+ 
+ def get_coord(root_pose, body_pose, lhand_pose, rhand_pose, jaw_pose, shape, expr, remove_lower=True):
+     batch_size = root_pose.shape[0]
+     zero_pose = torch.zeros((1, 3)).float().to(body_pose).repeat(batch_size, 1)  # eye poses
+ 
+-    smplx_layer = copy.deepcopy(smpl_x.layer['neutral']).cuda()
++    smplx_layer = _get_cached_smplx_layer(body_pose.device)
+     output = smplx_layer(betas=shape, body_pose=body_pose, global_orient=root_pose, right_hand_pose=rhand_pose,
+                                 left_hand_pose=lhand_pose, jaw_pose=jaw_pose, leye_pose=zero_pose,
+                                 reye_pose=zero_pose, expression=expr)
+@@ -328,4 +334,4 @@ if __name__ == '__main__':
+     P = torch.rand(5, 10, 3)
+     Q = torch.rand(5, 10, 3)
+     P2 = rigid_align_torch_batch(P, Q)
+-    # print(P2.shape)
+\ No newline at end of file
++    # print(P2.shape)
+diff --git a/mGPT/utils/load_checkpoint.py b/mGPT/utils/load_checkpoint.py
+index 579af29..cba3526 100644
+--- a/mGPT/utils/load_checkpoint.py
++++ b/mGPT/utils/load_checkpoint.py
+@@ -2,6 +2,16 @@ import torch
+ from mGPT.utils.misc import neq_load_customized
+ 
+ 
++def _torch_load_compat(path, map_location="cpu"):
++    # PyTorch >=2.6 defaults to weights_only=True; many legacy checkpoints
++    # (including tokenizer/model packs used here) require full pickle loading.
++    try:
++        return torch.load(path, map_location=map_location, weights_only=False)
++    except TypeError:
++        # Older torch versions do not expose weights_only.
++        return torch.load(path, map_location=map_location)
++
++
+ def load_pretrained(cfg, model, logger=None, phase="train"):    
+     if phase == "train":
+         ckpt_path = cfg.TRAIN.PRETRAINED
+@@ -11,14 +21,14 @@ def load_pretrained(cfg, model, logger=None, phase="train"):
+     if logger is not None:
+         logger.info(f"Loading pretrain model from {ckpt_path}")
+         
+-    state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
++    state_dict = _torch_load_compat(ckpt_path, map_location="cpu")["state_dict"]
+     model.load_state_dict(state_dict, strict=False)
+     return model
+ 
+ 
+ def load_pretrained_vae(cfg, model, logger=None):
+-    state_dict = torch.load(cfg.TRAIN.PRETRAINED_VAE,
+-                            map_location="cpu")['state_dict']
++    state_dict = _torch_load_compat(
++        cfg.TRAIN.PRETRAINED_VAE, map_location="cpu")['state_dict']
+     if logger is not None:
+         logger.info(f"Loading pretrain vae from {cfg.TRAIN.PRETRAINED_VAE}")
+         
+diff --git a/requirements.txt b/requirements.txt
+index d15ffa8..faea24a 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -4,12 +4,14 @@ torchmetrics
+ omegaconf
+ shortuuid
+ chumpy
+-transformers
++transformers==4.41.2
++sentencepiece>=0.1.99
+ diffusers
+ einops
+ wandb
+ rich
+ matplotlib
++pandas
+ 
+ # for visualization
+ smplx==0.1.28
+@@ -24,8 +26,8 @@ natsort
+ pyrender
+ moviepy
+ librosa
+-triangle==20220202
++triangle>=20230923
+ 
+ bpy==3.4.0
+ numpy==2.1.3
+-tqdm==4.67.0
+\ No newline at end of file
++tqdm==4.67.0
+diff --git a/test.py b/test.py
+index 56e5b87..3e7a797 100644
+--- a/test.py
++++ b/test.py
+@@ -1,20 +1,118 @@
+ import json
+ import os
++import time
++import subprocess
+ import numpy as np
+ import pytorch_lightning as pl
++import torch
+ import torch.distributed as dist
+ from pathlib import Path
+ from rich import get_console
+ from rich.table import Table
+ from omegaconf import OmegaConf
++from pytorch_lightning.loggers import CSVLogger
+ from mGPT.callback import build_callbacks
+-from mGPT.config import parse_args
++from mGPT.config import parse_args, instantiate_from_config
+ from mGPT.data.build_data import build_data
+ from mGPT.models.build_model import build_model
+ from mGPT.utils.logger import create_logger
+ from mGPT.utils.load_checkpoint import load_pretrained, load_pretrained_vae
+ 
+ 
++class InferenceProgressLogger(pl.Callback):
++    """Text progress logs for test/inference, useful when TTY progress bars are not visible."""
++
++    def __init__(self, logger, log_every_n_batches=50):
++        super().__init__()
++        self.logger = logger
++        self.log_every_n_batches = max(1, int(log_every_n_batches))
++        self._start_time = None
++        self._last_log_time = None
++        self._seen_batches = 0
++        self._total_batches = None
++
++    @staticmethod
++    def _format_time(seconds):
++        seconds = max(0, int(seconds))
++        h, rem = divmod(seconds, 3600)
++        m, s = divmod(rem, 60)
++        if h > 0:
++            return f"{h:02d}:{m:02d}:{s:02d}"
++        return f"{m:02d}:{s:02d}"
++
++    def on_test_start(self, trainer, pl_module):
++        self._start_time = time.time()
++        self._last_log_time = self._start_time
++        self._seen_batches = 0
++
++        raw_total = getattr(trainer, "num_test_batches", None)
++        if isinstance(raw_total, (list, tuple)):
++            self._total_batches = int(sum(raw_total))
++        elif raw_total is None:
++            self._total_batches = None
++        else:
++            self._total_batches = int(raw_total)
++
++        dataset_size = "unknown"
++        sample_cap = None
++        try:
++            dataset_size = len(trainer.datamodule.test_dataset)
++            sample_cap = getattr(trainer.datamodule.cfg.TEST, "MAX_SAMPLES", None)
++        except Exception:
++            pass
++        self.logger.info(
++            "Inference started | test_samples=%s | sample_cap=%s | test_batches=%s | batch_size=%s",
++            dataset_size,
++            sample_cap if sample_cap is not None else "none",
++            self._total_batches if self._total_batches is not None else "unknown",
++            trainer.datamodule.cfg.TEST.BATCH_SIZE if hasattr(trainer.datamodule, "cfg") else "unknown",
++        )
++
++    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
++        self._seen_batches += 1
++        now = time.time()
++
++        should_log = (
++            self._seen_batches == 1
++            or self._seen_batches % self.log_every_n_batches == 0
++            or (self._total_batches is not None and self._seen_batches >= self._total_batches)
++        )
++        if not should_log:
++            return
++
++        elapsed = max(now - self._start_time, 1e-6)
++        bps = self._seen_batches / elapsed
++        if self._total_batches is not None and self._total_batches > 0:
++            pct = 100.0 * self._seen_batches / self._total_batches
++            remaining_batches = max(self._total_batches - self._seen_batches, 0)
++            eta = remaining_batches / max(bps, 1e-9)
++            self.logger.info(
++                "Inference progress | %d/%d batches (%.2f%%) | %.2f batch/s | elapsed=%s | ETA=%s",
++                self._seen_batches,
++                self._total_batches,
++                pct,
++                bps,
++                self._format_time(elapsed),
++                self._format_time(eta),
++            )
++        else:
++            self.logger.info(
++                "Inference progress | batches_done=%d | %.2f batch/s | elapsed=%s",
++                self._seen_batches,
++                bps,
++                self._format_time(elapsed),
++            )
++        self._last_log_time = now
++
++    def on_test_end(self, trainer, pl_module):
++        elapsed = 0.0 if self._start_time is None else (time.time() - self._start_time)
++        self.logger.info(
++            "Inference finished | total_batches=%d | total_time=%s",
++            self._seen_batches,
++            self._format_time(elapsed),
++        )
++
++
+ def print_table(title, metrics, logger=None):
+     table = Table(title=title)
+ 
+@@ -37,11 +135,121 @@ def get_metric_statistics(values, replication_times):
+     return mean, conf_interval
+ 
+ 
++def _env_bool(name, default=False):
++    raw = os.environ.get(name, "").strip().lower()
++    if raw == "":
++        return default
++    return raw in {"1", "true", "yes", "on"}
++
++
++def _iter_loggers(trainer):
++    if getattr(trainer, "loggers", None):
++        return list(trainer.loggers)
++    if getattr(trainer, "logger", None) is not None:
++        return [trainer.logger]
++    return []
++
++
++def log_test_summary_to_wandb(trainer, mean_metrics, replication_times, logger):
++    if not mean_metrics:
++        return
++    payload = {
++        f"test_summary/{k}": float(v)
++        for k, v in mean_metrics.items()
++    }
++    payload["test_summary/replication_times"] = int(replication_times)
++    payload["test_summary/timestamp"] = int(time.time())
++    sent = False
++    for pl_logger in _iter_loggers(trainer):
++        name = pl_logger.__class__.__name__.lower()
++        if "wandb" not in name:
++            continue
++        try:
++            experiment = getattr(pl_logger, "experiment", None)
++            if experiment is not None:
++                experiment.log(payload)
++                sent = True
++        except Exception as e:
++            logger.warning("Unable to log test summary to W&B: %s", e)
++    if sent:
++        logger.info("Test summary metrics sent to W&B (%d items).", len(mean_metrics))
++
++
++def _build_quality_metrics_message(cfg, mean_metrics):
++    key_order = [
++        "Metrics/how2sign_DTW_MPJPE_PA_lhand/mean",
++        "Metrics/how2sign_DTW_MPJPE_PA_rhand/mean",
++        "Metrics/how2sign_DTW_MPJPE_PA_body/mean",
++        "Metrics/csl_DTW_MPJPE_PA_lhand/mean",
++        "Metrics/csl_DTW_MPJPE_PA_rhand/mean",
++        "Metrics/csl_DTW_MPJPE_PA_body/mean",
++        "Metrics/phoenix_DTW_MPJPE_PA_lhand/mean",
++        "Metrics/phoenix_DTW_MPJPE_PA_rhand/mean",
++        "Metrics/phoenix_DTW_MPJPE_PA_body/mean",
++        "Metrics/avg_DTW_MPJPE_PA_lhand/mean",
++        "Metrics/avg_DTW_MPJPE_PA_rhand/mean",
++        "Metrics/avg_DTW_MPJPE_PA_body/mean",
++        "Metrics/avg_DTW_MPJPE_PA_hand/mean",
++        "Metrics/avg_DTW_MPJPE_PA_hand_body/mean",
++    ]
++    labels = {
++        "Metrics/how2sign_DTW_MPJPE_PA_lhand/mean": "how2sign lhand",
++        "Metrics/how2sign_DTW_MPJPE_PA_rhand/mean": "how2sign rhand",
++        "Metrics/how2sign_DTW_MPJPE_PA_body/mean": "how2sign body",
++        "Metrics/csl_DTW_MPJPE_PA_lhand/mean": "csl lhand",
++        "Metrics/csl_DTW_MPJPE_PA_rhand/mean": "csl rhand",
++        "Metrics/csl_DTW_MPJPE_PA_body/mean": "csl body",
++        "Metrics/phoenix_DTW_MPJPE_PA_lhand/mean": "phoenix lhand",
++        "Metrics/phoenix_DTW_MPJPE_PA_rhand/mean": "phoenix rhand",
++        "Metrics/phoenix_DTW_MPJPE_PA_body/mean": "phoenix body",
++        "Metrics/avg_DTW_MPJPE_PA_lhand/mean": "avg lhand",
++        "Metrics/avg_DTW_MPJPE_PA_rhand/mean": "avg rhand",
++        "Metrics/avg_DTW_MPJPE_PA_body/mean": "avg body",
++        "Metrics/avg_DTW_MPJPE_PA_hand/mean": "avg hand",
++        "Metrics/avg_DTW_MPJPE_PA_hand_body/mean": "avg hand+body",
++    }
++
++    lines = [
++        f"[SOKE][test] QUALITY SUMMARY name={cfg.NAME} ckpt={Path(cfg.TEST.CHECKPOINTS).name}",
++        "DTW_MPJPE_PA metrics (hand/body):",
++    ]
++    found = 0
++    for key in key_order:
++        if key in mean_metrics:
++            lines.append(f"- {labels[key]}: {float(mean_metrics[key]):.3f}")
++            found += 1
++    if found == 0:
++        lines.append("- no quality metrics found")
++    return "\n".join(lines)
++
++
++def send_quality_metrics_telegram(cfg, mean_metrics, logger):
++    if not _env_bool("SOKE_TELEGRAM_NOTIFY", True):
++        return
++    root_dir = Path(__file__).resolve().parent
++    script = root_dir / "scripts" / "telegram_notify.sh"
++    if not script.is_file():
++        logger.warning("Telegram script not found: %s", script)
++        return
++    message = _build_quality_metrics_message(cfg, mean_metrics)
++    try:
++        subprocess.run([str(script), "text", message], check=False)
++        logger.info("Quality summary sent to Telegram.")
++    except Exception as e:
++        logger.warning("Unable to send quality summary to Telegram: %s", e)
++
++
+ def main():
+     # parse options
+     cfg = parse_args(phase="test")  # parse config file
+     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.USE_GPUS
+     cfg.FOLDER = cfg.TEST.FOLDER
++    if not os.environ.get("WANDB_API_KEY"):
++        cfg.LOGGER.WANDB.params.offline = True
++        os.environ["WANDB_MODE"] = "disabled"
++        cfg.LOGGER.TYPE = [x for x in cfg.LOGGER.TYPE if x.lower() != "wandb"]
++        if not cfg.LOGGER.TYPE:
++            cfg.LOGGER.TYPE = ["tensorboard"]
+ 
+     # for data_cfg in [h2s_cfg, csl_cfg]:
+         # cfg['DATASET']['H2S'] = data_cfg
+@@ -50,39 +258,76 @@ def main():
+     # logger.info(OmegaConf.to_yaml(cfg))
+     # logger.info(data_cfg['DATASET_NAME'])
+ 
++    if cfg.ACCELERATOR == "gpu" and not torch.cuda.is_available():
++        logger.warning("CUDA not available. Falling back to CPU.")
++        cfg.ACCELERATOR = "cpu"
++        cfg.DEVICE = 1
++        cfg.NUM_NODES = 1
++        cfg.TRAIN.NUM_WORKERS = 0
++        cfg.EVAL.NUM_WORKERS = 0
++        cfg.TEST.NUM_WORKERS = 0
++
+     # Seed
+     pl.seed_everything(cfg.SEED_VALUE)
+ 
+     # Environment Variables
+     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+ 
++    # Metric Logger
++    pl_loggers = []
++    for loggerName in cfg.LOGGER.TYPE:
++        if loggerName.lower() in {'tensorboard', 'wandb'}:
++            pl_logger = instantiate_from_config(
++                eval(f'cfg.LOGGER.{loggerName.upper()}'))
++            pl_loggers.append(pl_logger)
++    csv_logger = CSVLogger(save_dir=cfg.FOLDER_EXP, name="csv_logs", version="")
++    pl_loggers.append(csv_logger)
++    logger.info(f"CSV metrics log: {csv_logger.log_dir}")
++
+     # Callbacks
+     callbacks = build_callbacks(cfg, logger=logger, phase="test")
++    callbacks.append(InferenceProgressLogger(logger=logger, log_every_n_batches=50))
+     logger.info("Callbacks initialized")
+ 
+     # Dataset
+     datamodule = build_data(cfg)
+     logger.info("datasets module {} initialized".format("".join(
+         cfg.DATASET.target.split('.')[-2])))
++    if len(datamodule.test_dataset) == 0:
++        h2s_root = os.environ.get("SOKE_H2S_ROOT", "../data/How2Sign")
++        csl_root = os.environ.get("SOKE_CSL_ROOT", "../data/CSL-Daily")
++        pho_root = os.environ.get("SOKE_PHOENIX_ROOT", "../data/Phoenix_2014T")
++        raise RuntimeError(
++            "No test samples found. Populate pose directories under "
++            f"{h2s_root}, {csl_root}/poses, {pho_root}."
++        )
+ 
+     # Model
+     model = build_model(cfg, datamodule)
+     logger.info("model {} loaded".format(cfg.model.target))
+ 
+     # Lightning Trainer
++    if isinstance(cfg.DEVICE, int):
++        num_devices = cfg.DEVICE
++    else:
++        try:
++            num_devices = len(cfg.DEVICE)
++        except TypeError:
++            num_devices = int(cfg.DEVICE)
++
+     trainer = pl.Trainer(
+         benchmark=False,
+         max_epochs=cfg.TRAIN.END_EPOCH,
+         accelerator=cfg.ACCELERATOR,
+         devices=cfg.DEVICE,
+         num_nodes=cfg.NUM_NODES,
+-        strategy="ddp_find_unused_parameters_true" if len(cfg.DEVICE) > 1 else 'auto',
++        strategy="ddp_find_unused_parameters_true" if num_devices > 1 else 'auto',
+         default_root_dir=cfg.FOLDER_EXP,
+         reload_dataloaders_every_n_epochs=1,
+         deterministic=False,
+         detect_anomaly=False,
+         enable_progress_bar=True,
+-        logger=None,
++        logger=pl_loggers,
+         callbacks=callbacks,
+     )
+ 
+@@ -92,8 +337,40 @@ def main():
+ 
+     # loading state dict
+     if not cfg.TEST.CHECKPOINTS:
+-        ckpt_folder = os.path.join(cfg.FOLDER_EXP.replace('results', 'experiments'), 'checkpoints')
+-        cfg.TEST.CHECKPOINTS = os.path.join(ckpt_folder, 'last.ckpt')
++        candidates = []
++        # Primary path derived from the current test run name.
++        candidates.append(
++            os.path.join(
++                cfg.FOLDER_EXP.replace("results", "experiments"),
++                "checkpoints",
++                "last.ckpt",
++            )
++        )
++        # Common training run name used in this project.
++        candidates.append(
++            os.path.join(
++                cfg.FOLDER.replace("results", "experiments"),
++                "mgpt",
++                "SOKE",
++                "checkpoints",
++                "last.ckpt",
++            )
++        )
++        # Optional explicit default from env for production/server setups.
++        env_ckpt = os.environ.get("SOKE_DEFAULT_TEST_CKPT", "").strip()
++        if env_ckpt:
++            candidates.insert(0, env_ckpt)
++
++        chosen = next((p for p in candidates if p and os.path.isfile(p)), None)
++        if chosen is None:
++            pretty = "\n".join([f"  - {p}" for p in candidates if p])
++            raise FileNotFoundError(
++                "No inference checkpoint found. Searched:\n"
++                f"{pretty}\n"
++                "Provide one with `--checkpoint <path>` or set SOKE_DEFAULT_TEST_CKPT."
++            )
++        cfg.TEST.CHECKPOINTS = chosen
++        logger.info("Auto-selected checkpoint for inference: %s", chosen)
+     load_pretrained(cfg, model, logger, phase="test")
+     cfg.TIME = cfg.TEST.CHECKPOINTS.split('/')[-1]
+ 
+@@ -119,14 +396,25 @@ def main():
+             else:
+                 all_metrics[key] += [item]
+ 
++    mean_metrics = {}
+     all_metrics_new = {}
+ 
+     for key, item in all_metrics.items():
+         mean, conf_interval = get_metric_statistics(np.array(item),
+                                                     replication_times)
+-        all_metrics_new[key + "/mean"] = f"{mean:.3f}"
++        metric_key = key + "/mean"
++        mean_metrics[metric_key] = float(mean)
++        all_metrics_new[metric_key] = f"{mean:.3f}"
+         # all_metrics_new[key + "/conf_interval"] = conf_interval
+ 
++    log_test_summary_to_wandb(
++        trainer=trainer,
++        mean_metrics=mean_metrics,
++        replication_times=replication_times,
++        logger=logger,
++    )
++    send_quality_metrics_telegram(cfg=cfg, mean_metrics=mean_metrics, logger=logger)
++
+     print_table(f"Mean Metrics", all_metrics_new, logger=logger)
+     all_metrics_new.update(all_metrics)
+     print('Finished testing on ckpt: ', cfg.TEST.CHECKPOINTS)
+diff --git a/train.py b/train.py
+index 34ed437..9657367 100644
+--- a/train.py
++++ b/train.py
+@@ -52,6 +52,7 @@ def main():
+     trainer = pl.Trainer(
+         default_root_dir=cfg.FOLDER_EXP,
+         max_epochs=cfg.TRAIN.END_EPOCH,
++        accumulate_grad_batches=cfg.TRAIN.get('ACCUMULATE_GRAD_BATCHES', 1),
+         # precision='16',
+         logger=pl_loggers,
+         callbacks=callbacks,

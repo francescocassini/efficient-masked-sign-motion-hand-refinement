@@ -1,0 +1,21 @@
+target: mGPT.archs.mgpt_mbart_nar_p3_train_aligned.Mbart_Based_MLM_NAR_P3_TrainAligned
+params:
+  model_type: mbart_multi
+  model_path: ./deps/mbart-h2s-csl-phoenix
+  num_heads: 3
+  stage: ${TRAIN.STAGE}
+  motion_codebook_size: ${model.params.codebook_size}
+  ablation: ${ABLATION}
+  nar_steps: 4
+  nar_min_mask_ratio: 0.05
+  nar_on_policy_prob: 0.0
+  nar_sample_temperature: 2.0
+  nar_sample_top_k: 40
+  nar_mask_token_prob: 0.8
+  nar_random_token_prob: 0.1
+  nar_label_smoothing: 0.1
+  length_predictor: true
+  length_predictor_kind: linear_text_units
+  length_only_training: false
+  length_min_tokens: 10
+  length_max_tokens: 100

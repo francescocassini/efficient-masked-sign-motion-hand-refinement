@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this delta artifact, please cite the associated paper and upstream SOKE."
+title: "Efficient Masked Sign Motion Generation with Conservative Hand Refinement: Delta Artifact"
+authors:
+  - family-names: "Cassini"
+    given-names: "Francesco"
+  - family-names: "Musumeci"
+    given-names: "Emanuele"
+  - family-names: "Suriani"
+    given-names: "Vincenzo"
+repository-code: "https://github.com/francescocassini/efficient-masked-sign-motion-delta"
+date-released: "2026-06-30"
