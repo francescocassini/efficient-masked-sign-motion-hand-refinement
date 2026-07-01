@@ -42,8 +42,8 @@ def parse_args():
     parser.add_argument("--config", default="configs/soke.yaml", type=Path)
     parser.add_argument("--default-config", default="configs/default.yaml", type=Path)
     parser.add_argument("--vae-ckpt", default="deps/tokenizer_ckpt/tokenizer.ckpt", type=Path)
-    parser.add_argument("--mean-path", default="/workspace/SOKE_DATA/CSL-Daily/mean.pt", type=Path)
-    parser.add_argument("--std-path", default="/workspace/SOKE_DATA/CSL-Daily/std.pt", type=Path)
+    parser.add_argument("--mean-path", default="datasets/CSL-Daily/mean.pt", type=Path)
+    parser.add_argument("--std-path", default="datasets/CSL-Daily/std.pt", type=Path)
     parser.add_argument("--budget", type=float, default=0.30)
     parser.add_argument(
         "--selection",

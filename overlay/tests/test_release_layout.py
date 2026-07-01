@@ -48,6 +48,7 @@ def main() -> None:
         "scripts/download_models.py",
         "scripts/download_dataset_from_hf.sh",
         "docs/METHOD_MAPPING.md",
+        "docs/EXTERNAL_ARTIFACTS.md",
         "docs/PAPER_RESULTS.md",
         "docs/PROVENANCE.md",
         "docs/RELEASE_CHECKLIST.md",

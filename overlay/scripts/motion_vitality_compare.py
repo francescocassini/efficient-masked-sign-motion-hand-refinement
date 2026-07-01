@@ -29,8 +29,8 @@ def parse_args():
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--candidate-name", default="CANDIDATE")
-    parser.add_argument("--mean", default="../data/CSL-Daily/mean.pt", type=Path)
-    parser.add_argument("--std", default="../data/CSL-Daily/std.pt", type=Path)
+    parser.add_argument("--mean", default="datasets/CSL-Daily/mean.pt", type=Path)
+    parser.add_argument("--std", default="datasets/CSL-Daily/std.pt", type=Path)
     parser.add_argument("--diversity-samples", default=200, type=int)
     return parser.parse_args()
 
