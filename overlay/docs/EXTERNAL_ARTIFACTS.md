@@ -3,8 +3,8 @@
 This document describes the files that are intentionally not stored in the
 public delta repository. Paths are relative to this reconstructed SOKE checkout.
 
-Do not commit datasets, checkpoints, generated caches, private split archives or
-access tokens to Git.
+Do not commit datasets, checkpoints, generated caches, split archives or access
+tokens to Git.
 
 ## Required Directory Layout
 
@@ -47,19 +47,19 @@ checkpoint, either by copying the file or by creating a local symlink.
 | How2Sign dataset files | optional mixed-dataset compatibility | `datasets/How2Sign/` | raw videos: `https://how2sign.github.io/`; SOKE split files: `https://drive.google.com/drive/folders/1sPhBwmiWCXLZSHtM3fpotbz3BDgoYmco?usp=sharing` |
 | CSL-Daily dataset files | CSL training/eval | `datasets/CSL-Daily/` | raw videos: `http://home.ustc.edu.cn/~zhouh156/dataset/csl-daily/`; SOKE split files: `https://drive.google.com/drive/folders/17uPm6r5_DQ9CIYZonfwQLpw1XI8LeNEr?usp=drive_link` |
 | Phoenix-2014T dataset files | Phoenix training/eval | `datasets/Phoenix_2014T/` | raw videos: `https://www-i6.informatik.rwth-aachen.de/~koller/RWTH-PHOENIX-2014-T/`; SOKE split files: `https://drive.google.com/drive/folders/1Z2zjOH5wvwT7x_F6IycWAN-nh2wgJOx1?usp=sharing` |
-| SOKE-AR e69 checkpoint | Table 2/3 baseline | `artifacts/checkpoints/soke_ar_e69.ckpt` | train from upstream SOKE-compatible config or use private artifact store |
-| Masked-NAR e19 checkpoint | default P3/P5 runtime, HandPolish base | `artifacts/checkpoints/masked_nar_e19.ckpt` and usually `artifacts/checkpoints/p3.ckpt` | train with `configs/train/p3_csl_phoenix.yaml` or use private artifact store |
-| Masked-NAR e49 checkpoint | Table 2 direct Masked-NAR row | `artifacts/checkpoints/masked_nar_e49.ckpt` | train/select checkpoint or use private artifact store |
-| HandPolish R5 caches | Table 4 post-cache benchmark | `artifacts/handpolish_cache/rep0/` ... `rep4/` or documented cache dirs | regenerate with `configs/paper/table4_poseselect_postcache.yaml` or use private artifact store |
-| P6-B hand-token editor checkpoint | PoseSelect/GainEdit candidate scoring dependency | `artifacts/p6b/p6b.ckpt` | train with the included P6-B scripts or use private artifact store |
-| GainEdit regressor checkpoint | Table 4/5 baseline and PoseSelect feature dependency | `artifacts/gainedit/gainedit.ckpt` | train with `scripts/train_gainedit.py` or use private artifact store |
-| PoseSelect checkpoint | Table 4/5 deployable selector | `artifacts/poseselect/poseselect.ckpt` | train with `scripts/train_poseselect.py` or use private artifact store |
+| SOKE-AR e69 checkpoint | Table 2/3 baseline | `artifacts/checkpoints/soke_ar_e69.ckpt` | train from the upstream-compatible SOKE-AR baseline, or download from a public artifact release if provided |
+| Masked-NAR e19 checkpoint | default P3/P5 runtime, HandPolish base | `artifacts/checkpoints/masked_nar_e19.ckpt` and usually `artifacts/checkpoints/p3.ckpt` | train with `configs/train/p3_csl_phoenix.yaml`, or download from a public artifact release if provided |
+| Masked-NAR e49 checkpoint | Table 2 direct Masked-NAR row | `artifacts/checkpoints/masked_nar_e49.ckpt` | train/select checkpoint from Masked-NAR training, or download from a public artifact release if provided |
+| HandPolish R5 caches | Table 4 post-cache benchmark | `artifacts/handpolish_cache/rep0/` ... `rep4/` or documented cache dirs | regenerate with `configs/paper/table4_poseselect_postcache.yaml`, or download from a public artifact release if provided |
+| P6-B hand-token editor checkpoint | PoseSelect/GainEdit candidate scoring dependency | `artifacts/p6b/p6b.ckpt` | train with the included P6-B scripts, or download from a public artifact release if provided |
+| GainEdit regressor checkpoint | Table 4/5 baseline and PoseSelect feature dependency | `artifacts/gainedit/gainedit.ckpt` | train with `scripts/train_gainedit.py`, or download from a public artifact release if provided |
+| PoseSelect checkpoint | Table 4/5 deployable selector | `artifacts/poseselect/poseselect.ckpt` | train with `scripts/train_poseselect.py`, or download from a public artifact release if provided |
 
 The upstream links above are inherited from the official SOKE README. The
-paper-specific weights are new to this artifact and must be either trained by
-the user or distributed separately by the authors. If you publish a model repo,
-use the file names in the table so `scripts/download_models.py` can install them
-without additional configuration.
+paper-specific weights are new to this artifact and should be regenerated from
+the experiments unless the authors publish a public artifact bundle. If such a
+bundle is released, it should use the file names in the table so expected paths
+remain stable.
 
 ## Dataset Download Notes
 
@@ -73,8 +73,8 @@ procedures. A typical setup is:
    `datasets/CSL-Daily` and `datasets/Phoenix_2014T`.
 5. Place `mean.pt` and `std.pt` under `datasets/CSL-Daily/`.
 
-If you maintain a private Hugging Face dataset mirror, package the prepared
-folders as:
+If you maintain a local, institutional or public mirror of prepared datasets,
+package the folders as:
 
 ```text
 How2Sign.tar.gz
@@ -85,15 +85,13 @@ Phoenix_2014T.tar.gz
 Then run:
 
 ```bash
-export HF_TOKEN=...
-export SOKENAR_DATA_REPO=YOUR_HF_USER/YOUR_DATASET_REPO
-bash scripts/download_dataset_from_hf.sh "$SOKENAR_DATA_REPO" datasets
+bash scripts/download_dataset_from_hf.sh YOUR_DATASET_REPO_OR_MIRROR datasets
 ```
 
-## Private Hugging Face Layout
+## Optional Public Artifact Bundle Layout
 
-The downloader is optional. If you use it, create a private Hugging Face model
-repository with any subset of these files:
+The model downloader is optional and is intended for a public artifact bundle,
+if one is released. The bundle may contain any subset of these files:
 
 ```text
 p3.ckpt
@@ -111,12 +109,11 @@ Then run:
 
 ```bash
 export HF_TOKEN=...
-export SOKENAR_MODEL_REPO=YOUR_HF_USER/YOUR_MODEL_REPO
+export SOKENAR_MODEL_REPO=YOUR_ORG/YOUR_MODEL_REPO
 python scripts/download_models.py
 ```
 
-For datasets, a private Hugging Face dataset repository may contain archives
-named:
+For datasets, a prepared dataset mirror may contain archives named:
 
 ```text
 How2Sign.tar.gz
@@ -128,15 +125,15 @@ or the equivalent `.zip` files. Download and extract with:
 
 ```bash
 export HF_TOKEN=...
-export SOKENAR_DATA_REPO=YOUR_HF_USER/YOUR_DATASET_REPO
+export SOKENAR_DATA_REPO=YOUR_ORG/YOUR_DATASET_REPO
 bash scripts/download_dataset_from_hf.sh "$SOKENAR_DATA_REPO" datasets
 ```
 
 ## Manual Placement
 
-If you do not use Hugging Face, place files manually in the expected paths above.
-The configs in `configs/infer/` use `artifacts/checkpoints/p3.ckpt`. The paper
-configs in `configs/paper/` use the explicit checkpoint names under
+If you do not use an artifact bundle, place files manually in the expected paths
+above. The configs in `configs/infer/` use `artifacts/checkpoints/p3.ckpt`.
+The paper configs in `configs/paper/` use the explicit checkpoint names under
 `artifacts/checkpoints/`.
 
 To keep one checkpoint under multiple expected names, local symlinks are fine:

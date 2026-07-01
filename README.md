@@ -38,6 +38,12 @@ because they were used during development. The paper-facing names are
 **Masked-NAR**, **HandPolish**, **PoseSelect**, **GainEdit** and
 **OracleSelect**.
 
+![Pipeline overview](overlay/assets/figures/pipeline_overview.svg)
+
+The qualitative comparison used in the paper is also included:
+
+![Qualitative comparison](overlay/assets/figures/paper_qualitative_contrastive_compact_with_maskednar_2x.png)
+
 ## Repository Shape
 
 This work is built on top of the official SOKE codebase:
@@ -118,8 +124,7 @@ After reconstruction:
 cp .env.example .env
 ```
 
-Then edit `.env` if you use private Hugging Face repositories or non-default
-paths.
+Then edit `.env` if you use non-default local paths.
 
 ### Upstream SOKE Assets
 
@@ -144,7 +149,8 @@ training/evaluation.
 ### Paper-Specific Artifacts
 
 The paper-specific checkpoints and caches are not upstream SOKE assets. They
-must be trained locally or distributed separately by the paper authors.
+must be created by running the experiments below, or downloaded from a public
+artifact release if the authors publish one.
 
 | Paper-facing role | Expected path |
 |---|---|
@@ -165,32 +171,26 @@ used for HandPolish:
 ln -s masked_nar_e19.ckpt artifacts/checkpoints/p3.ckpt
 ```
 
-### Optional Private Hugging Face Mirrors
+### Creating Paper-Specific Artifacts
 
-If you keep model artifacts in a private Hugging Face model repo, use these file
-names so the downloader can place them automatically:
+The intended reproducibility path is to create the paper artifacts from data:
 
-```text
-p3.ckpt
-masked_nar_e19.ckpt
-masked_nar_e49.ckpt
-soke_ar_e69.ckpt
-p6b.ckpt
-gainedit.ckpt
-poseselect.ckpt
-tokenizer.ckpt
-mbart-h2s-csl-phoenix/
-```
+| Artifact | Creation path |
+|---|---|
+| SOKE-AR baseline checkpoint | train/evaluate the upstream-compatible SOKE-AR baseline using the reconstructed SOKE environment |
+| Masked-NAR checkpoints | run **Experiment 1** below with `configs/train/p3_csl_phoenix.yaml`; select the checkpoints used by the table configs |
+| HandPolish cache replicas | run **Experiment 2** with prediction saving enabled, or `configs/paper/table4_poseselect_postcache.yaml` for matched-cache evaluation |
+| P6-B hand-token editor | train the included hand-token editor scripts on saved HandPolish caches |
+| GainEdit regressor | train with `scripts/train_gainedit.py` on saved HandPolish caches |
+| PoseSelect selector | train with `scripts/train_poseselect.py` on saved HandPolish caches |
 
-Then run:
+If a public model artifact bundle is released, it should use the file names in
+the table above so the expected paths remain unchanged. Until such a public
+bundle exists, the README treats these files as artifacts to be regenerated.
 
-```bash
-export HF_TOKEN=...
-export SOKENAR_MODEL_REPO=YOUR_HF_USER/YOUR_MODEL_REPO
-python scripts/download_models.py
-```
+### Optional Dataset Archive Mirror
 
-If you keep prepared datasets in a private Hugging Face dataset repo, package
+If you maintain a local or institutional mirror of prepared datasets, package
 them as:
 
 ```text
@@ -202,9 +202,7 @@ Phoenix_2014T.tar.gz
 Then run:
 
 ```bash
-export HF_TOKEN=...
-export SOKENAR_DATA_REPO=YOUR_HF_USER/YOUR_DATASET_REPO
-bash scripts/download_dataset_from_hf.sh "$SOKENAR_DATA_REPO" datasets
+bash scripts/download_dataset_from_hf.sh YOUR_DATASET_REPO_OR_MIRROR datasets
 ```
 
 See `docs/EXTERNAL_ARTIFACTS.md` for the full artifact checklist.
@@ -255,6 +253,13 @@ Main implementation:
 | training config | `configs/train/p3_csl_phoenix.yaml` |
 | inference configs | `configs/infer/p3_csl.yaml`, `configs/infer/p3_phoenix.yaml` |
 
+What to inspect:
+
+- length is estimated from text at inference;
+- body, left-hand and right-hand prediction heads are stream-specific;
+- iterative decoding reopens low-confidence positions using a masked schedule;
+- generated tokens are decoded by the unchanged SOKE-compatible VQ decoder.
+
 Train Masked-NAR:
 
 ```bash
@@ -298,6 +303,13 @@ Main implementation:
 | hand-only refinement | `mGPT/archs/mgpt_mbart_nar_p5_hand_polish_aggressive.py` |
 | LM config | `configs/lm/mbart_h2s_csl_phoenix_nar_p5_hand_polish_aggressive.yaml` |
 | inference configs | `configs/infer/p5_csl.yaml`, `configs/infer/p5_phoenix.yaml` |
+
+What to inspect:
+
+- HandPolish has no separate trainable network;
+- body tokens are fixed before hand remasking begins;
+- only left/right hand positions with low confidence are reopened;
+- the refinement remains inside the discrete SOKE-compatible hand codebooks.
 
 Run Masked-NAR + HandPolish inference:
 
@@ -355,6 +367,15 @@ Main implementation:
 | evaluation wrapper | `scripts/eval_poseselect.py` |
 | selector model | `mGPT/models/utils/p6_topk_candidate_selector.py` |
 | Table 4 aggregation | `scripts/reproduce_table4_refinement.py` |
+
+What to inspect:
+
+- candidate sets are formed from generated hand-token alternatives;
+- training labels are computed offline, but inference features do not require
+  ground-truth poses;
+- the selector chooses among candidates instead of regressing arbitrary
+  continuous hand poses;
+- body features/tokens are copied from the HandPolish cache.
 
 Train PoseSelect from saved HandPolish caches:
 
@@ -419,6 +440,7 @@ Table 5.
 The selected qualitative asset is included for paper inspection:
 
 ```text
+assets/figures/pipeline_overview.svg
 assets/figures/paper_qualitative_contrastive_compact_with_maskednar_2x.png
 assets/figures/paper_qualitative_contrastive_compact_with_maskednar.svg
 ```
