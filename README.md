@@ -491,13 +491,13 @@ Use this checklist to verify that the code matches the paper narrative:
 
 ## Citation
 
-If this artifact is useful, cite this paper and upstream SOKE:
+If this artifact is useful, cite the paper:
 
 ```bibtex
-@inproceedings{zuo2025soke,
-  title={Signs as Tokens: A Retrieval-Enhanced Multilingual Sign Language Generator},
-  author={Zuo, Ronglai and Potamias, Rolandos Alexandros and Ververas, Evangelos and Deng, Jiankang and Zafeiriou, Stefanos},
-  booktitle={ICCV},
-  year={2025}
+@inproceedings{anonymous2026maskedsign,
+  title={Efficient Masked Decoding for Sign Motion Generation with Hand-Aware Token Refinement},
+  author={Anonymous},
+  booktitle={Under review},
+  year={2026}
 }
 ```
