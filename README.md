@@ -1,48 +1,44 @@
-# Efficient Masked Decoding for Sign Motion Generation
+# Efficient Masked Decoding for Sign Motion Generation with Hand-Aware Token Refinement
 
-Code artifact for the paper:
+Text-to-sign motion generation maps written sentences to articulated signing
+sequences. Token-based generators such as SOKE encode motion as separate body,
+left hand and right hand Vector Quantized (VQ) streams and generate them
+autoregressively from text, so decoding cost grows with sequence length. This
+work keeps the tokenizer, the anatomical streams and the VQ decoder fixed and
+replaces sequential decoding with a three-stage hand-aware pipeline:
 
-**Efficient Masked Decoding for Sign Motion Generation with Hand-Aware Token Refinement**
+- **Masked-NAR** generates the three token streams in parallel through
+  iterative masked non-autoregressive decoding, with the token length
+  estimated from the text;
+- **HandPolish** reopens and regenerates low-confidence hand tokens at
+  inference time while the body stream remains fixed, without training an
+  additional refinement network;
+- **PoseSelect** selects among top-k alternative hand tokens with a learned
+  selector that uses only pose features available at inference time.
 
-This repository is organized as a scientific reproducibility path. Its purpose
-is to let a reviewer reconstruct the codebase, inspect how each paper
-contribution is implemented, and run the experiments that support the reported
-claims.
+On CSL-Daily and Phoenix-2014T, Masked-NAR improves three of the four direct
+pose metrics over the autoregressive baseline, with end-to-end speedups
+between 1.73x and 2.02x and about a quarter of the measured GPU energy.
+HandPolish and PoseSelect further improve hand articulation at a measured
+extra cost.
 
-## What the Paper Studies
-
-The paper asks whether a SOKE-compatible sign-motion token space can be decoded
-more efficiently and then refined locally on uncertain hand tokens without
-changing the tokenizer or final VQ decoder.
-
-The code implements and evaluates three paper contributions:
-
-| Contribution | Question | Code to inspect |
-|---|---|---|
-| **Masked-NAR** | Can SOKE-compatible body/left-hand/right-hand tokens be generated with masked parallel decoding instead of autoregressive decoding? | `mGPT/archs/mgpt_mbart_nar_p3_train_aligned.py` |
-| **HandPolish** | Can low-confidence hand tokens be reopened while preserving body tokens by construction? | `mGPT/archs/mgpt_mbart_nar_p5_hand_polish_aggressive.py` |
-| **PoseSelect** | Can a learned post-cache selector choose better top-k hand-token candidates using only inference-available features? | `scripts/train_poseselect.py`, `scripts/eval_poseselect.py`, `mGPT/models/utils/p6_topk_candidate_selector.py` |
-
-The artifact also includes:
-
-| Component | Role |
-|---|---|
-| **SOKE-AR** | upstream-compatible autoregressive baseline |
-| **GainEdit** | deployable post-cache baseline for hand-token editing |
-| **OracleSelect** | non-deployable diagnostic ceiling using ground-truth supervision |
-| **Table 2-5 wrappers** | stable entrypoints for the paper protocols |
-| **Qualitative assets** | selected paper qualitative figure and regeneration script |
-
-Historical implementation names such as `p3`, `p5` or `p6` appear in filenames
-because they were used during development. The paper-facing names are
-**Masked-NAR**, **HandPolish**, **PoseSelect**, **GainEdit** and
-**OracleSelect**.
+This repository contains the code needed to reproduce the experiments of the
+paper.
 
 ![Pipeline overview](overlay/assets/figures/figure_2.png)
 
-The qualitative comparison used in the paper is also included:
+## Code Map
 
-![Qualitative comparison](overlay/assets/figures/paper_qualitative_contrastive_compact_2x.png)
+| Stage | Main code |
+|---|---|
+| **Masked-NAR** | `mGPT/archs/mgpt_mbart_nar_p3_train_aligned.py` |
+| **HandPolish** | `mGPT/archs/mgpt_mbart_nar_p5_hand_polish_aggressive.py` |
+| **PoseSelect** | `scripts/train_poseselect.py`, `scripts/eval_poseselect.py`, `mGPT/models/utils/p6_topk_candidate_selector.py` |
+
+The evaluation also includes **SOKE-AR** (the autoregressive baseline),
+**GainEdit** (a deployable post-cache hand-token editing baseline),
+**OracleSelect** (a diagnostic ceiling that uses ground-truth supervision) and
+the wrapper scripts for the paper tables (`scripts/reproduce_table*.py`).
 
 ## Repository Shape
 
@@ -64,8 +60,7 @@ overlay that reconstruct the complete working code locally.
 | `scripts/apply_delta.sh` | applies the patch and copies the overlay |
 | `docs/EXTERNAL_ARTIFACTS.md` | detailed data, weights and cache setup |
 
-The rest of this README is written from the perspective of the reconstructed
-SOKE checkout, because that is the codebase a reviewer will run.
+All paths and commands below refer to the reconstructed SOKE checkout.
 
 ## 1. Reconstruct the Codebase
 
@@ -75,21 +70,21 @@ From an empty directory:
 git clone https://github.com/2000ZRL/SOKE.git
 git -C SOKE checkout 5cbc55d84b5a7cbf05a9cf020c468052e8d94d00
 
-git clone https://github.com/francescocassini/efficient-masked-sign-motion-hand-refinement.git
-bash efficient-masked-sign-motion-hand-refinement/scripts/apply_delta.sh SOKE
+git clone <THIS_REPOSITORY_URL> paper-delta
+bash paper-delta/scripts/apply_delta.sh SOKE
 
 cd SOKE
 python tests/test_release_layout.py
 ```
 
 The final command checks that the reconstructed tree contains the paper code,
-configs, wrappers, docs and qualitative assets.
+configs and wrappers.
 
 Manual reconstruction is equivalent to:
 
 ```bash
-git -C SOKE apply ../efficient-masked-sign-motion-hand-refinement/patches/soke-integration.patch
-cp -a ../efficient-masked-sign-motion-hand-refinement/overlay/. SOKE/
+git -C SOKE apply ../paper-delta/patches/soke-integration.patch
+cp -a ../paper-delta/overlay/. SOKE/
 ```
 
 ## 2. Create the Environment
@@ -115,8 +110,8 @@ paths described below.
 
 ## 3. Download External Assets
 
-The repository intentionally excludes datasets, generated caches, checkpoints
-and large model weights. This keeps the code artifact legal and inspectable.
+Datasets, generated caches, checkpoints and large model weights are not
+committed to this repository.
 
 After reconstruction:
 
@@ -150,7 +145,7 @@ training/evaluation.
 
 The paper-specific checkpoints and caches are not upstream SOKE assets. They
 must be created by running the experiments below, or downloaded from a public
-artifact release if the authors publish one.
+artifact release if one is published.
 
 | Paper-facing role | Expected path |
 |---|---|
@@ -158,7 +153,7 @@ artifact release if the authors publish one.
 | Masked-NAR checkpoint used for HandPolish | `artifacts/checkpoints/masked_nar_e19.ckpt` |
 | Masked-NAR direct-generation checkpoint | `artifacts/checkpoints/masked_nar_e49.ckpt` |
 | Default Masked-NAR runtime checkpoint | `artifacts/checkpoints/p3.ckpt` |
-| P6-B hand-token editor used by PoseSelect features | `artifacts/p6b/p6b.ckpt` |
+| Hand-token editor used by PoseSelect features | `artifacts/p6b/p6b.ckpt` |
 | GainEdit regressor checkpoint | `artifacts/gainedit/gainedit.ckpt` |
 | PoseSelect checkpoint | `artifacts/poseselect/poseselect.ckpt` |
 | HandPolish cache replicas | `artifacts/handpolish_cache/rep0/` ... `rep4/` |
@@ -180,13 +175,12 @@ The intended reproducibility path is to create the paper artifacts from data:
 | SOKE-AR baseline checkpoint | train/evaluate the upstream-compatible SOKE-AR baseline using the reconstructed SOKE environment |
 | Masked-NAR checkpoints | run **Experiment 1** below with `configs/train/p3_csl_phoenix.yaml`; select the checkpoints used by the table configs |
 | HandPolish cache replicas | run **Experiment 2** with prediction saving enabled, or `configs/paper/table4_poseselect_postcache.yaml` for matched-cache evaluation |
-| P6-B hand-token editor | train the included hand-token editor scripts on saved HandPolish caches |
+| Hand-token editor | train the included hand-token editor scripts on saved HandPolish caches |
 | GainEdit regressor | train with `scripts/train_gainedit.py` on saved HandPolish caches |
 | PoseSelect selector | train with `scripts/train_poseselect.py` on saved HandPolish caches |
 
 If a public model artifact bundle is released, it should use the file names in
-the table above so the expected paths remain unchanged. Until such a public
-bundle exists, the README treats these files as artifacts to be regenerated.
+the table above so the expected paths remain unchanged.
 
 ### Optional Dataset Archive Mirror
 
@@ -237,14 +231,17 @@ test -f datasets/CSL-Daily/mean.pt
 test -f datasets/CSL-Daily/std.pt
 ```
 
+Reference values for every paper table are recorded in
+`docs/PAPER_RESULTS.md`.
+
 ## 5. Experiment 1: Masked-NAR Generation
 
-**Paper claim checked:** Masked-NAR replaces autoregressive token generation
-with iterative masked parallel decoding in the same SOKE-compatible token space.
-It estimates token length from text and does not use ground-truth length at test
-time.
-
-Main implementation:
+Masked-NAR replaces autoregressive token generation with iterative masked
+parallel decoding in the same SOKE-compatible token space. Length is estimated
+from text at inference, the body, left-hand and right-hand prediction heads
+are stream-specific, iterative decoding reopens low-confidence positions with
+a masked schedule, and the generated tokens are decoded by the unchanged VQ
+decoder.
 
 | Role | File |
 |---|---|
@@ -252,13 +249,6 @@ Main implementation:
 | LM config | `configs/lm/mbart_h2s_csl_phoenix_nar_p3_train_aligned.yaml` |
 | training config | `configs/train/p3_csl_phoenix.yaml` |
 | inference configs | `configs/infer/p3_csl.yaml`, `configs/infer/p3_phoenix.yaml` |
-
-What to inspect:
-
-- length is estimated from text at inference;
-- body, left-hand and right-hand prediction heads are stream-specific;
-- iterative decoding reopens low-confidence positions using a masked schedule;
-- generated tokens are decoded by the unchanged SOKE-compatible VQ decoder.
 
 Train Masked-NAR:
 
@@ -274,7 +264,7 @@ python -m test --cfg configs/infer/p3_phoenix.yaml \
   --task t2m --nodebug --use_gpus 0 --device 0 --num_nodes 1
 ```
 
-Run the paper Table 2 configuration listing:
+List the paper Table 2 configurations:
 
 ```bash
 python scripts/reproduce_table2_pose.py
@@ -287,29 +277,19 @@ python -u -m test --cfg configs/paper/table2_masked_nar_direct.yaml \
   --task t2m --nodebug
 ```
 
-Expected paper-level evidence is summarized in `docs/PAPER_RESULTS.md` under
-Table 2.
-
 ## 6. Experiment 2: HandPolish
 
-**Paper claim checked:** HandPolish reuses Masked-NAR probabilities at inference
-to reopen low-confidence hand tokens while keeping body tokens fixed. It adds no
-trainable parameters.
-
-Main implementation:
+HandPolish reuses the Masked-NAR probabilities at inference to reopen
+low-confidence hand tokens while keeping body tokens fixed. It adds no
+trainable parameters: body tokens are frozen before hand remasking begins,
+only low-confidence left/right hand positions are reopened, and the
+refinement stays inside the discrete SOKE-compatible hand codebooks.
 
 | Role | File |
 |---|---|
 | hand-only refinement | `mGPT/archs/mgpt_mbart_nar_p5_hand_polish_aggressive.py` |
 | LM config | `configs/lm/mbart_h2s_csl_phoenix_nar_p5_hand_polish_aggressive.yaml` |
 | inference configs | `configs/infer/p5_csl.yaml`, `configs/infer/p5_phoenix.yaml` |
-
-What to inspect:
-
-- HandPolish has no separate trainable network;
-- body tokens are fixed before hand remasking begins;
-- only left/right hand positions with low confidence are reopened;
-- the refinement remains inside the discrete SOKE-compatible hand codebooks.
 
 Run Masked-NAR + HandPolish inference:
 
@@ -325,13 +305,11 @@ python -u -m test --cfg configs/paper/table2_handpolish.yaml \
   --task t2m --nodebug
 ```
 
-Reviewer check: inspect the code path to verify that the body stream is copied
-unchanged and only left/right hand tokens are reopened.
-
 ## 7. Experiment 3: End-to-End Efficiency
 
-**Paper claim checked:** Masked-NAR reduces end-to-end test-loop time relative
-to SOKE-AR, and HandPolish adds only a small measured overhead.
+The efficiency benchmark measures the complete test loop (generation, VQ
+decoding, exact-DTW metrics and prediction saving) for SOKE-AR, Masked-NAR and
+Masked-NAR + HandPolish on Phoenix-200 and CSL-200.
 
 Entrypoint:
 
@@ -346,20 +324,15 @@ This wrapper lists the benchmark scripts used for Table 3:
 | Phoenix-200 | `scripts/t0a_efficiency_benchmark.py`, `configs/paper/table3_*_phoenix200.yaml` |
 | CSL-200 | `scripts/t0a_efficiency_benchmark_csl.py`, `configs/paper/table3_*_csl200.yaml` |
 
-The protocol includes generation, VQ decoding, exact-DTW metrics and prediction
-saving. GPU-board energy numbers require the same hardware-monitoring setup
-used in the paper.
-
-Expected paper-level evidence is summarized in `docs/PAPER_RESULTS.md` under
-Table 3.
+GPU energy numbers require the same hardware-monitoring setup used in the
+paper.
 
 ## 8. Experiment 4: PoseSelect Post-Cache Refinement
 
-**Paper claim checked:** PoseSelect is a learned post-cache selector over top-k
-hand-token candidates. It is trained with offline oracle labels, but at
-inference uses only generated-cache and candidate-token features.
-
-Main implementation:
+PoseSelect is a learned selector over top-k hand-token candidates built from
+saved HandPolish caches. Training labels are computed offline; at inference
+the selector uses only generated-cache and candidate-token features, and the
+body stream is copied unchanged from the cache.
 
 | Role | File |
 |---|---|
@@ -367,15 +340,6 @@ Main implementation:
 | evaluation wrapper | `scripts/eval_poseselect.py` |
 | selector model | `mGPT/models/utils/p6_topk_candidate_selector.py` |
 | Table 4 aggregation | `scripts/reproduce_table4_refinement.py` |
-
-What to inspect:
-
-- candidate sets are formed from generated hand-token alternatives;
-- training labels are computed offline, but inference features do not require
-  ground-truth poses;
-- the selector chooses among candidates instead of regressing arbitrary
-  continuous hand poses;
-- body features/tokens are copied from the HandPolish cache.
 
 Train PoseSelect from saved HandPolish caches:
 
@@ -408,20 +372,11 @@ Aggregate the paper Table 4 matched-cache protocol:
 python scripts/reproduce_table4_refinement.py
 ```
 
-Reviewer checks:
-
-- PoseSelect is not parameter-free.
-- OracleSelect is a diagnostic ceiling and should not be treated as deployable.
-- PoseSelect copies the body stream from the HandPolish cache and edits only
-  selected hand tokens.
-
-Expected paper-level evidence is summarized in `docs/PAPER_RESULTS.md` under
-Table 4.
-
 ## 9. Experiment 5: Post-Cache Overhead
 
-**Paper claim checked:** PoseSelect and GainEdit are measured as post-cache
-refinement stages, separate from native generation.
+The overhead benchmark starts from a validated HandPolish cache and measures
+the deployable post-cache refinement variants (PoseSelect and GainEdit)
+separately from native generation.
 
 Run:
 
@@ -429,65 +384,7 @@ Run:
 python scripts/reproduce_table5_overhead.py --help
 ```
 
-The underlying benchmark is `scripts/benchmark_p6k_t0a_style.py`. It starts
-from a validated HandPolish cache and measures deployable post-cache variants.
-
-Expected paper-level evidence is summarized in `docs/PAPER_RESULTS.md` under
-Table 5.
-
-## 10. Qualitative Figure
-
-The selected qualitative asset is included for paper inspection:
-
-```text
-assets/figures/figure_2.png
-assets/figures/paper_qualitative_contrastive_compact_2x.png
-```
-
-Regeneration wrapper:
-
-```bash
-python scripts/make_paper_qualitative_figure.py
-```
-
-The figure is qualitative evidence only. Quantitative claims should be checked
-through the table protocols above.
-
-## Paper Results Index
-
-Recorded paper table values are in:
-
-```text
-docs/PAPER_RESULTS.md
-docs/results/table4_poseselect/summary.md
-docs/results/table4_poseselect/summary.json
-docs/results/table5_overhead/summary.json
-```
-
-## Reviewer Checklist
-
-Use this checklist to verify that the code matches the paper narrative:
-
-- Masked-NAR uses estimated length at test time, not ground-truth length.
-- Masked-NAR predicts body, left-hand and right-hand tokens with stream-specific
-  valid codebooks.
-- HandPolish reopens only low-confidence hand tokens and keeps body tokens
-  fixed.
-- PoseSelect is learned, post-cache and ground-truth-free at inference.
-- GainEdit is a deployable baseline; OracleSelect is non-deployable diagnostic
-  ceiling.
-- Table 2/3 are native generation protocols; Table 4/5 are post-cache protocols.
-- Reported energy is GPU-board/protocol-specific, not a universal system energy
-  claim.
-
-## Limitations
-
-- The complete code is reconstructed locally from SOKE plus this paper overlay.
-- Datasets, checkpoints and generated caches are intentionally not committed.
-- Exact paper numbers require the documented external artifacts, cache replicas
-  and hardware protocol.
-- The reconstructed SOKE+paper checkout should not be redistributed as a full
-  modified SOKE fork without a separate license/provenance decision.
+The underlying benchmark is `scripts/benchmark_p6k_t0a_style.py`.
 
 ## Citation
 
