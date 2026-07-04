@@ -38,11 +38,11 @@ because they were used during development. The paper-facing names are
 **Masked-NAR**, **HandPolish**, **PoseSelect**, **GainEdit** and
 **OracleSelect**.
 
-![Pipeline overview](overlay/assets/figures/pipeline_overview.svg)
+![Pipeline overview](overlay/assets/figures/figure_2.png)
 
 The qualitative comparison used in the paper is also included:
 
-![Qualitative comparison](overlay/assets/figures/paper_qualitative_contrastive_compact_with_maskednar_2x.png)
+![Qualitative comparison](overlay/assets/figures/paper_qualitative_contrastive_compact_2x.png)
 
 ## Repository Shape
 
@@ -440,9 +440,8 @@ Table 5.
 The selected qualitative asset is included for paper inspection:
 
 ```text
-assets/figures/pipeline_overview.svg
-assets/figures/paper_qualitative_contrastive_compact_with_maskednar_2x.png
-assets/figures/paper_qualitative_contrastive_compact_with_maskednar.svg
+assets/figures/figure_2.png
+assets/figures/paper_qualitative_contrastive_compact_2x.png
 ```
 
 Regeneration wrapper:

@@ -82,8 +82,7 @@ Summary file:
 
 Selected asset:
 
-- `assets/figures/paper_qualitative_contrastive_compact_with_maskednar_2x.png`
-- `assets/figures/paper_qualitative_contrastive_compact_with_maskednar.svg`
+- `assets/figures/paper_qualitative_contrastive_compact_2x.png`
 
 Regeneration wrapper:
 

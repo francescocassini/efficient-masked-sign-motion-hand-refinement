@@ -55,8 +55,8 @@ def main() -> None:
         "docs/results/table4_poseselect/summary.md",
         "docs/results/table4_poseselect/summary.json",
         "docs/results/table5_overhead/summary.json",
-        "assets/figures/pipeline_overview.svg",
-        "assets/figures/paper_qualitative_contrastive_compact_with_maskednar_2x.png",
+        "assets/figures/figure_2.png",
+        "assets/figures/paper_qualitative_contrastive_compact_2x.png",
     ]
     for path in required:
         require(path)
