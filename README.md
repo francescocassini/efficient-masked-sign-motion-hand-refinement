@@ -231,17 +231,63 @@ test -f datasets/CSL-Daily/mean.pt
 test -f datasets/CSL-Daily/std.pt
 ```
 
-Reference values for every paper table are recorded in
-`docs/PAPER_RESULTS.md`.
+## Experiments
+
+The five experiments below reproduce the paper tables. Each experiment lists
+the protocol, the commands and the expected results as reported in the paper.
+Recorded reference values are also in `docs/PAPER_RESULTS.md`. Exact
+reproduction of the numbers requires the documented checkpoints, caches and
+hardware protocol; on different hardware the internal comparisons, not the
+absolute values, are the reproducible quantity.
+
+Metrics used throughout:
+
+- **PA-body / PA-hand**: Procrustes-Aligned Joint Position Error computed
+  after Dynamic Time Warping temporal alignment (DTW-PA-JPE), reported
+  separately for the body stream and for the two hands. Lower is better.
+- **Speed/GT and tstd/GT**: ratios between the motion speed (mean displacement
+  of consecutive pose frames) and the temporal standard deviation of the
+  generated sequence and those of the ground truth (GT) sequence. Values
+  closer to one indicate dynamics closer to the reference; they expose the
+  oversmoothing that PA-JPE alone would not reveal.
+- **Efficiency**: total runtime over 200 samples, throughput, speedup relative
+  to SOKE-AR and GPU energy per sample, estimated by sampling the board power
+  with `nvidia-smi` during the test loop and integrating over time.
+
+Protocol behind each experiment:
+
+| Experiment | Paper table | Setting | Samples, replicas | Compared methods | GT used |
+|---|---|---|---|---|---|
+| 1 | Table 2 | native generation | 1818, 5 | SOKE-AR, Masked-NAR | no |
+| 2 | Table 2 | native generation | 1818, 5 | Masked-NAR base, + HandPolish | no |
+| 3 | Table 3 | end-to-end test loop | 200 per dataset, 3 | SOKE-AR, Masked-NAR, + HandPolish | no |
+| 4 | Table 4 | post-cache refinement | 1818, 5 aligned | HandPolish cache, GainEdit, PoseSelect, OracleSelect | OracleSelect only |
+| 5 | Table 5 | post-cache runtime | 240 (16 warmup) | GainEdit, PoseSelect | no |
+
+The full test benchmark contains 1818 effective samples (1176 from CSL-Daily,
+642 from Phoenix-2014T) after removal of samples without a valid text and
+motion pair. All methods produce the three token streams and are evaluated
+only after the shared VQ decoder maps them back to a pose sequence; dataset
+construction, exact DTW alignment, VQ decoding and the PA-JPE implementation
+are shared across all methods.
 
 ## 5. Experiment 1: Masked-NAR Generation
 
 Masked-NAR replaces autoregressive token generation with iterative masked
-parallel decoding in the same SOKE-compatible token space. Length is estimated
-from text at inference, the body, left-hand and right-hand prediction heads
-are stream-specific, iterative decoding reopens low-confidence positions with
-a masked schedule, and the generated tokens are decoded by the unchanged VQ
-decoder.
+parallel decoding in the same SOKE-compatible token space. Training corrupts
+tokens BERT-style (masked, randomly replaced by a valid stream token, or kept
+unchanged) with stream-restricted cross-entropy. At inference, token length is
+estimated from text (ground-truth length is never used), all positions start
+as `[MASK]` and are refined for K=4 iterations: after each iteration,
+confidence is averaged across the body, left-hand and right-hand streams and
+a cosine schedule reopens the least confident temporal positions. Prediction
+heads are stream-specific, so each stream stays inside its own codebook, and
+the generated tokens are decoded by the unchanged VQ decoder.
+
+The benchmark uses five independent evaluation replicas with batch size 4.
+Two Masked-NAR checkpoints play different roles: *direct* is the strongest
+direct comparison against SOKE-AR; *HandPolish base* is the checkpoint to
+which HandPolish is applied in Experiment 2.
 
 | Role | File |
 |---|---|
@@ -277,13 +323,30 @@ python -u -m test --cfg configs/paper/table2_masked_nar_direct.yaml \
   --task t2m --nodebug
 ```
 
+**Expected results** (paper Table 2, DTW-PA-JPE, lower is better, mean over
+five replicas with 95% confidence intervals):
+
+| Method | CSL body | CSL hand | PHX body | PHX hand |
+|---|---|---|---|---|
+| SOKE-AR | 9.6791 | **1.8732** | 8.0912 | 1.6491 |
+| Masked-NAR (direct) | 9.1851 ± 0.0502 | 1.8869 ± 0.0056 | 6.9940 ± 0.0429 | 1.4045 ± 0.0047 |
+
+SOKE-AR decodes deterministically from a single pre-trained checkpoint, so
+repeated replicas produce identical values. Masked-NAR (direct) improves three
+of the four pose metrics; the exception is CSL PA-hand, where SOKE-AR remains
+slightly better.
+
 ## 6. Experiment 2: HandPolish
 
 HandPolish reuses the Masked-NAR probabilities at inference to reopen
 low-confidence hand tokens while keeping body tokens fixed. It adds no
-trainable parameters: body tokens are frozen before hand remasking begins,
-only low-confidence left/right hand positions are reopened, and the
-refinement stays inside the discrete SOKE-compatible hand codebooks.
+trainable parameters: the body stream is frozen before hand remasking begins
+and remains invariant across all passes. Hand-token confidence is the maximum
+probability assigned by the generator head under the current grid; three
+polishing passes with a decreasing schedule (25%, 15%, 8% of positions per
+hand) reopen the least confident left/right hand positions independently and
+update them by stream-wise argmax, keeping the sequence length fixed and the
+edits inside the discrete SOKE-compatible hand codebooks.
 
 | Role | File |
 |---|---|
@@ -305,11 +368,27 @@ python -u -m test --cfg configs/paper/table2_handpolish.yaml \
   --task t2m --nodebug
 ```
 
+**Expected results** (paper Table 2, HandPolish applied to its matched base
+checkpoint):
+
+| Method | CSL body | CSL hand | PHX body | PHX hand |
+|---|---|---|---|---|
+| Masked-NAR (HandPolish base) | 8.7414 ± 0.0226 | 1.9343 ± 0.0019 | 6.8017 ± 0.0307 | 1.4031 ± 0.0013 |
+| Masked-NAR + HandPolish | **8.7329 ± 0.0223** | **1.8867 ± 0.0013** | **6.7983 ± 0.0306** | **1.3555 ± 0.0037** |
+
+Polishing improves all four metrics on the matched checkpoint, with the main
+effect on hand articulation: PA-hand improves by about 2.46% on CSL-Daily and
+3.39% on Phoenix-2014T. Body metrics change only slightly and indirectly,
+because DTW computes a single temporal alignment for the whole sequence.
+
 ## 7. Experiment 3: End-to-End Efficiency
 
 The efficiency benchmark measures the complete test loop (generation, VQ
 decoding, exact-DTW metrics and prediction saving) for SOKE-AR, Masked-NAR and
-Masked-NAR + HandPolish on Phoenix-200 and CSL-200.
+Masked-NAR + HandPolish on Phoenix-200 and CSL-200 (the first 200 samples of
+each dataset). The protocol runs on a single NVIDIA RTX 4090 GPU with three
+replicas per method; GPU energy is estimated by sampling the board power with
+`nvidia-smi` during the loop and integrating over time.
 
 Entrypoint:
 
@@ -327,12 +406,40 @@ This wrapper lists the benchmark scripts used for Table 3:
 GPU energy numbers require the same hardware-monitoring setup used in the
 paper.
 
+**Expected results** (paper Table 3, measured on one NVIDIA RTX 4090; absolute
+values are hardware-dependent, the speedup and energy ratios are the
+reproducible comparison):
+
+| Dataset | Method | Time (200) | Sample/s | Speedup | J/sample | Energy ratio |
+|---|---|---|---|---|---|---|
+| Phoenix | SOKE-AR | 71.62 s | 2.793 | 1.000x | 77.74 | 1.000 |
+| Phoenix | Masked-NAR | 34.93 s | 5.727 | 2.051x | 18.37 | 0.236 |
+| Phoenix | Masked-NAR + HandPolish | 35.41 s | 5.648 | 2.023x | 19.73 | 0.254 |
+| CSL | SOKE-AR | 63.12 s | 3.169 | 1.000x | 72.12 | 1.000 |
+| CSL | Masked-NAR | 36.15 s | 5.533 | 1.746x | 18.89 | 0.262 |
+| CSL | Masked-NAR + HandPolish | 36.49 s | 5.480 | 1.730x | 19.92 | 0.276 |
+
+HandPolish preserves nearly all of the Masked-NAR efficiency advantage: it
+adds 0.48 s on Phoenix-200 and 0.34 s on CSL-200 over the full loop.
+
 ## 8. Experiment 4: PoseSelect Post-Cache Refinement
 
 PoseSelect is a learned selector over top-k hand-token candidates built from
-saved HandPolish caches. Training labels are computed offline; at inference
-the selector uses only generated-cache and candidate-token features, and the
-body stream is copied unchanged from the cache.
+saved HandPolish caches. For each hand position, the candidate set contains
+the current token plus the top-5 replacement proposals of a dedicated
+candidate network; the selector scores candidates using only features
+computable from the cache and the candidate tokens (token identity and rank,
+confidences, gain-style scores, position and change flags, decoded geometry
+and vitality descriptors). An edit budget caps the changed manual positions at
+20%, and the body stream is copied unchanged from the cache. Training labels
+are computed offline by an oracle that ranks candidates against the
+ground-truth pose; at inference no ground truth is used.
+
+PoseSelect is evaluated in two settings: a clean split with disjoint training,
+validation and test caches (25491, 1596 and 1818 samples; the selector
+checkpoint is chosen on the validation cache), and the R5 setting that applies
+PoseSelect to five regenerated HandPolish caches aligned with the main
+protocol. Paper Table 4 uses the R5 setting.
 
 | Role | File |
 |---|---|
@@ -372,11 +479,35 @@ Aggregate the paper Table 4 matched-cache protocol:
 python scripts/reproduce_table4_refinement.py
 ```
 
+**Expected results** (paper Table 4, five aligned replicas; all methods start
+from the same matched HandPolish caches, so these values are not numerically
+comparable with the native HandPolish row of Table 2):
+
+| Dataset | Method | PA-body | PA-hand | Speed/GT | Tstd/GT |
+|---|---|---|---|---|---|
+| CSL | HandPolish cache | 8.3125 | 1.8072 | 0.772 | 0.611 |
+| CSL | + GainEdit | 8.2962 | 1.6908 | 0.734 | 0.586 |
+| CSL | + PoseSelect | **8.2931** | **1.6854** | **0.767** | **0.634** |
+| CSL | + OracleSelect | 8.2966 | 1.5802 | 0.751 | 0.613 |
+| Phoenix | HandPolish cache | 6.7732 | 1.3519 | 0.546 | 0.588 |
+| Phoenix | + GainEdit | 6.7662 | **1.3127** | 0.455 | 0.509 |
+| Phoenix | + PoseSelect | **6.7631** | 1.3127 | **0.522** | **0.578** |
+| Phoenix | + OracleSelect | 6.7650 | 1.2498 | 0.513 | 0.559 |
+
+PoseSelect improves PA-hand over the cache by about 6.74% on CSL-Daily and
+2.90% on Phoenix-2014T while preserving more motion vitality than GainEdit
+(on CSL it is the only deployable editing variant whose tstd/GT is above the
+unedited cache). OracleSelect uses ground truth at evaluation time and is a
+diagnostic ceiling, not a deployable method; bold marks the best deployable
+value per column.
+
 ## 9. Experiment 5: Post-Cache Overhead
 
 The overhead benchmark starts from a validated HandPolish cache and measures
 the deployable post-cache refinement variants (PoseSelect and GainEdit)
-separately from native generation.
+separately from native generation: 240 measured samples after 16 warmup
+samples, including the final hand VQ decoding but excluding full-sequence
+generation, metrics and saving.
 
 Run:
 
@@ -385,6 +516,17 @@ python scripts/reproduce_table5_overhead.py --help
 ```
 
 The underlying benchmark is `scripts/benchmark_p6k_t0a_style.py`.
+
+**Expected results** (paper Table 5):
+
+| Variant | sec/sample | sample/s | peak CUDA MB | J/sample |
+|---|---|---|---|---|
+| GainEdit | 0.004415 | 226.48 | 259.1 | 0.246 |
+| PoseSelect | 0.084813 | 11.79 | 259.1 | 3.722 |
+
+PoseSelect is slower than GainEdit (84.8 vs 4.4 ms per sample) with similar
+peak memory: this runtime is the cost of the vitality-preserving behavior
+reported in Table 4.
 
 ## Citation
 
